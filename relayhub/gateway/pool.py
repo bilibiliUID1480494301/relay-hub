@@ -60,13 +60,18 @@ def classify_failure(status: int, message: str) -> str | None:
     """把上游失败归入冷却档位。返回 None 表示不该熔断（请求本身的问题）。"""
     if status in (401, 403):
         return TIER_DISABLE
+    lowered = message.lower()
     if status == 429:
+        # 429 有两种：限流和额度耗尽——后者必须落 plan 档（12h），否则额度
+        # 耗尽的渠道每 60 秒白挨一枪（OpenAI 的 insufficient_quota、配额码
+        # 1005、「余额不足」都会以 429 + 文案出现）。先判文案再回 soft。
+        if any(marker in lowered for marker in _QUOTA_MARKERS):
+            return TIER_PLAN
         return TIER_SOFT
     if status == 0 or status >= 500:
         return TIER_ERR
     # 其余 4xx 默认是请求写错了（400/404），不算渠道故障；
     # 但带额度语义的例外——那是账号的事，不是请求的事。
-    lowered = message.lower()
     if any(marker in lowered for marker in _QUOTA_MARKERS):
         return TIER_PLAN
     return None

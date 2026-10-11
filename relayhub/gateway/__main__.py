@@ -328,6 +328,7 @@ def _cmd_serve(argv: list[str]) -> int:
         verbose=args.verbose,
         tokens=token_store,
         pairing=pairing_service,
+        toip=toip_service,
         request_log=None if args.no_request_log else paths.requests_log_path(),
         ip_rpm=args.ip_rpm,
         max_concurrency=args.max_concurrency,
@@ -918,15 +919,21 @@ def _cmd_clients_ls(args: argparse.Namespace) -> int:
 
 
 def _cmd_clients_spec(args: argparse.Namespace) -> int:
-    profile = clients_module.get(args.client)
-    models: list = list(args.model or ())
-    payload = clients_module.onboarding(
-        args.client,
-        base_url=args.base_url,
-        api_key=args.api_key,
-        models=models,
-        spec_name=args.name,
-    )
+    try:
+        profile = clients_module.get(args.client)
+        models: list = list(args.model or ())
+        payload = clients_module.onboarding(
+            args.client,
+            base_url=args.base_url,
+            api_key=args.api_key,
+            models=models,
+            spec_name=args.name,
+        )
+    except KeyError as exc:
+        # 未知档案/规格：给一行人话（get() 的消息里带已知清单），别甩裸 traceback。
+        detail = exc.args[0] if exc.args else str(exc)
+        print(f"错误：{detail}", file=sys.stderr)
+        return 2
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
@@ -1399,7 +1406,7 @@ def _cmd_toip(argv: list[str]) -> int:
 
 
 def _cmd_mcp_add(args: argparse.Namespace) -> int:
-    from .gateway.mcp import McpChannel, McpChannelPool
+    from .mcp import McpChannel, McpChannelPool
 
     pool_path = paths.mcp_channels_path()
     pool = McpChannelPool.load(pool_path)
@@ -1429,7 +1436,7 @@ def _cmd_mcp_add(args: argparse.Namespace) -> int:
 
 
 def _cmd_mcp_ls(args: argparse.Namespace) -> int:
-    from .gateway.mcp import McpChannelPool
+    from .mcp import McpChannelPool
 
     pool = McpChannelPool.load(paths.mcp_channels_path())
     if not pool.channels:
@@ -1442,7 +1449,7 @@ def _cmd_mcp_ls(args: argparse.Namespace) -> int:
 
 
 def _cmd_mcp_rm(args: argparse.Namespace) -> int:
-    from .gateway.mcp import McpChannelPool
+    from .mcp import McpChannelPool
 
     pool = McpChannelPool.load(paths.mcp_channels_path())
     if not pool.remove(args.name):
@@ -1457,7 +1464,7 @@ def _cmd_mcp_rm(args: argparse.Namespace) -> int:
 
 
 def _cmd_a2a_add(args: argparse.Namespace) -> int:
-    from .gateway.a2a import A2aAgent, A2aPool
+    from .a2a import A2aAgent, A2aPool
 
     pool_path = paths.a2a_agents_path()
     pool = A2aPool.load(pool_path)
@@ -1480,7 +1487,7 @@ def _cmd_a2a_add(args: argparse.Namespace) -> int:
 
 
 def _cmd_a2a_ls(args: argparse.Namespace) -> int:
-    from .gateway.a2a import A2aPool
+    from .a2a import A2aPool
 
     pool = A2aPool.load(paths.a2a_agents_path())
     if not pool.agents:
@@ -1493,7 +1500,7 @@ def _cmd_a2a_ls(args: argparse.Namespace) -> int:
 
 
 def _cmd_a2a_rm(args: argparse.Namespace) -> int:
-    from .gateway.a2a import A2aPool
+    from .a2a import A2aPool
 
     pool = A2aPool.load(paths.a2a_agents_path())
     if not pool.remove(args.name):
