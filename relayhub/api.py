@@ -524,9 +524,17 @@ class Station:
         router = KeyPoolRouter(self._pool(), persist_path=self.pool_file)
         token_store = TokenStore(self.tokens_file)
         from .gateway import pairing as pairing_module  # local import to avoid cycles
+        from .gateway import toip as toip_module  # 同上；TOIP 数据面与控制面共享文件
 
         pairing = pairing_module.PairingService(
             tokens=token_store, path=self.home / "pairing.json"
+        )
+        # TOIP 与 CLI serve 同款接线：文件名用同一组（toip.json / toip_tickets.json），
+        # `hubrelay toip station/ticket` 与 Station API 共享站点身份与通行证。
+        toip_service = toip_module.ToipService(
+            toip_module.TicketStore(self.home / "toip_tickets.json"),
+            token_store,
+            self.home / "toip.json",
         )
         server = RelayServer(
             (self.host, self.port),
@@ -534,6 +542,7 @@ class Station:
             api_key=self.master_key or None,
             tokens=token_store,
             pairing=pairing,
+            toip=toip_service,
             verbose=verbose,
             request_log=self.home / "requests.jsonl",
         )

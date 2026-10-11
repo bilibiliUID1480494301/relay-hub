@@ -36,3 +36,13 @@ def test_top_level_version():
     r = _run("--version")
     assert r.returncode == 0
     assert r.stdout.strip().endswith("0.2.12") or "hubrelay" in r.stdout
+
+
+def test_clients_spec_unknown_profile_is_friendly(capsys):
+    """未知档案要一行人话 + rc=2（0.8.0 是裸 KeyError traceback）。"""
+    from relayhub.gateway.__main__ import main
+
+    rc = main(["clients", "spec", "no-such-client"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "未知客户端" in captured.err

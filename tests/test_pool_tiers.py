@@ -53,6 +53,11 @@ def _key(label: str, credits: int = -1) -> UpstreamKey:
         # 4xx 但带额度语义：是账号的事，不是请求的事（1005 是实测配额码）
         (400, "error 1005: credit exhausted", TIER_PLAN),
         (402, "insufficient balance", TIER_PLAN),
+        # 429 带额度语义（OpenAI 的 insufficient_quota、配额码 1005、「余额不足」）
+        # 必须落 plan 档——429 不等于限流，否则耗尽的渠道每 60s 白挨一枪。
+        (429, "insufficient_quota: you exceeded your current quota", TIER_PLAN),
+        (429, "余额不足", TIER_PLAN),
+        (429, "error 1005: credit exhausted", TIER_PLAN),
         (400, "配额已用完", TIER_PLAN),
     ],
 )

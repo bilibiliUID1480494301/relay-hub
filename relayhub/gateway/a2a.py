@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .. import __version__ as relayhub_version
 from .. import paths
 from . import secretbox
 
@@ -86,7 +87,7 @@ def agent_card(pool_path: Path, station_name: str, base_url: str) -> dict[str, A
         "name": station_name,
         "description": f"{station_name} — relay-hub A2A gateway",
         "url": base_url,
-        "version": "0.6.0",
+        "version": relayhub_version,  # 随包版本单一来源（pyproject），别写死
         "capabilities": {"streaming": False},
         "skills": [
             {

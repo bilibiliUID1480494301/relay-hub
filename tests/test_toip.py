@@ -17,6 +17,9 @@ from __future__ import annotations
 import base64
 import json
 import os
+import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -27,7 +30,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from relayhub import paths
+from relayhub import api, paths
 from relayhub.gateway import pluginlogs, toip
 from relayhub.gateway.service import DemoRouter, RelayServer, demo_pool
 from relayhub.gateway.tokens import DownstreamToken, TokenPool, TokenStore
@@ -896,3 +899,92 @@ def test_console_page_has_plugin_and_toip_tabs(tmp_path: Path) -> None:
     tabs = set(re.findall(r'data-tab="([a-z]+)"', html))
     panes = set(re.findall(r'id="pane-([a-z]+)"', html))
     assert tabs <= panes, f"缺 pane：{tabs - panes}"
+
+
+# -- 启动接线回归（0.8.0 的两处断点）---------------------------------------
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def test_station_serve_wires_toip(tmp_path: Path) -> None:
+    """Station.serve 必须把 ToipService 传进 RelayServer。
+
+    0.8.0 两条启动路径都断：Station 连服务对象都没建、CLI 建了没传——
+    端点级测试全用手搭的 RelayServer(toip=...)，生产接线断没断反而没人管。
+    这里走真 Station.serve：先建站点身份（否则「未启用」与「没建站」同为 404，
+    分不清接没接线），再打 /v1/toip/station 断言 200。
+    """
+    station_home = tmp_path / "station"
+    station_home.mkdir()
+    toip.save_station(
+        station_home / "toip.json",
+        toip.StationIdentity.create(name="api-toip"),
+    )
+    st = api.Station(port=_free_port(), master_key="rh_m", home=station_home)
+    base = st.serve(background=True)
+    try:
+        status, payload = get(base, "/v1/toip/station")
+        assert status == 200, payload
+    finally:
+        st.stop()
+
+
+def test_cli_serve_wires_toip(tmp_path: Path) -> None:
+    """CLI serve 的 toip_service 必须真的传进 RelayServer（0.8.0 建了忘传）。
+
+    子进程起真站：先 `toip station` 建站点身份，serve 后 /v1/toip/station 必须 200。
+    """
+    with managed_home(tmp_path) as _home:
+        repo_root = str(Path(__file__).resolve().parent.parent)
+        env = dict(os.environ)  # managed_home 已把 RELAYHUB_HOME 指向 tmp，子进程继承
+        port = _free_port()
+        made = subprocess.run(
+            [sys.executable, "-m", "relayhub.gateway", "toip", "station", "--name", "cli-toip"],
+            capture_output=True, text=True, timeout=60, env=env, cwd=repo_root,
+        )
+        assert made.returncode == 0, made.stderr[-300:]
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "relayhub.gateway", "serve", "--port", str(port)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=env, cwd=repo_root,
+        )
+        try:
+            deadline = time.time() + 30
+            up = False
+            while time.time() < deadline and not up:
+                try:
+                    urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=2)
+                    up = True
+                except Exception:
+                    time.sleep(0.3)
+            assert up, "CLI serve 没起来"
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/v1/toip/station", timeout=5
+            ) as resp:
+                assert resp.status == 200
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+
+
+def test_toip_mcp_a2a_cli_commands(tmp_path: Path) -> None:
+    """toip mcp / toip a2a 六个命令全链路可用。
+
+    0.8.0 里 `from .gateway.mcp` 多套一层包，六个命令一跑就 ModuleNotFoundError。
+    add/ls/rm 各走一遍，把六处 import 点全覆盖。
+    """
+    from relayhub.gateway.__main__ import main
+
+    with managed_home(tmp_path):
+        assert main(["toip", "mcp", "ls"]) == 0
+        assert main(["toip", "mcp", "add", "demo", "http://127.0.0.1:9/mcp"]) == 0
+        assert main(["toip", "mcp", "ls"]) == 0
+        assert main(["toip", "mcp", "rm", "demo"]) == 0
+        assert main(["toip", "a2a", "ls"]) == 0
+        assert main(["toip", "a2a", "add", "agent-x", "http://127.0.0.1:9/a2a"]) == 0
+        assert main(["toip", "a2a", "ls"]) == 0
+        assert main(["toip", "a2a", "rm", "agent-x"]) == 0

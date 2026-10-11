@@ -161,3 +161,12 @@ def test_gateway_unknown_agent_is_clean_error(tmp_path: Path) -> None:
                                         "params": {"agent": "ghost", "message": {}}})
             assert status == 200
             assert reply["error"]["code"] == -32602
+
+
+def test_agent_card_version_follows_package(tmp_path: Path) -> None:
+    """名片 version 必须随包版本单一来源（0.8.0 写死在 0.6.0）。"""
+    from relayhub import __version__
+    from relayhub.gateway.a2a import agent_card
+
+    card = agent_card(tmp_path / "a2a.json", "st-name", "http://127.0.0.1:8799")
+    assert card["version"] == __version__
