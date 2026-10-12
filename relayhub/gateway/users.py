@@ -119,6 +119,8 @@ class UserPool:
         price_in_per_1k: float = 2.0,
         price_out_per_1k: float = 6.0,
         groups: dict[str, float] | None = None,
+        peak_hours: list[int] | None = None,
+        peak_multiplier: float = 1.0,
     ) -> None:
         self.users: list[User] = list(users or [])
         self.allow_register = bool(allow_register)
@@ -126,6 +128,12 @@ class UserPool:
         self.price_in_per_1k = float(price_in_per_1k)
         self.price_out_per_1k = float(price_out_per_1k)
         self.groups: dict[str, float] = dict(groups or {"default": 1.0})
+        # 分时计费：peak_hours = 峰时小时集合（0-23），峰时标价 × peak_multiplier，
+        # 谷时恒 1.0（谷价就是标价）。空表或倍率 1 = 不启用。
+        self.peak_hours: set[int] = {
+            int(h) for h in (peak_hours or []) if 0 <= int(h) <= 23
+        }
+        self.peak_multiplier = float(peak_multiplier)
 
     @classmethod
     def load(cls, path: Path) -> "UserPool":
@@ -140,6 +148,8 @@ class UserPool:
             price_in_per_1k=float(raw.get("price_in_per_1k", 2.0) or 0.0),
             price_out_per_1k=float(raw.get("price_out_per_1k", 6.0) or 0.0),
             groups={str(k): float(v) for k, v in (raw.get("groups") or {"default": 1.0}).items()},
+            peak_hours=[int(h) for h in (raw.get("peak_hours") or []) if 0 <= int(h) <= 23],
+            peak_multiplier=float(raw.get("peak_multiplier", 1.0) or 1.0),
         )
 
     def save(self, path: Path) -> None:
@@ -152,6 +162,8 @@ class UserPool:
             "price_in_per_1k": self.price_in_per_1k,
             "price_out_per_1k": self.price_out_per_1k,
             "groups": self.groups,
+            "peak_hours": sorted(self.peak_hours),
+            "peak_multiplier": self.peak_multiplier,
             "users": [u.to_dict() for u in self.users],
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -167,14 +179,23 @@ class UserPool:
     def multiplier_for(self, user: User) -> float:
         return self.groups.get(user.group, 1.0)
 
-    def cost_of(self, user: User, tokens_in: int, tokens_out: int) -> int:
-        """按 tokens 折点 × 分组倍率，向上取整。额度 -1（不限量）不参与计费。"""
+    def time_multiplier(self, ts: float | None = None) -> float:
+        """分时倍率：峰时（local hour ∈ peak_hours）返回 peak_multiplier，谷时恒 1.0。"""
+        if not self.peak_hours or self.peak_multiplier == 1.0:
+            return 1.0
+        hour = time.localtime(ts if ts is not None else time.time()).tm_hour
+        return self.peak_multiplier if hour in self.peak_hours else 1.0
+
+    def cost_of(
+        self, user: User, tokens_in: int, tokens_out: int, ts: float | None = None
+    ) -> int:
+        """按 tokens 折点 × 分组倍率 × 分时倍率，向上取整。额度 -1 不参与计费。"""
         if user.quota < 0:
             return 0
         base = tokens_in / 1000.0 * self.price_in_per_1k + tokens_out / 1000.0 * self.price_out_per_1k
         if base <= 0:
             return 0
-        return max(1, math.ceil(base * self.multiplier_for(user)))
+        return max(1, math.ceil(base * self.multiplier_for(user) * self.time_multiplier(ts)))
 
     # -- 增删改（调用方负责持锁与落盘） -----------------------------------
 

@@ -843,7 +843,21 @@ function renderHome(u){
     '<h3>兑换码</h3><input id="code" placeholder="rhx-…"><div class="ok-msg" id="msg"></div>'+
     '<button onclick="doRedeem()">兑换</button>'+
     '<h3>API Key</h3><button class="ghost" onclick="doRotate()">重置 Key（旧 Key 立即失效）</button>'+
+    panelExtras(u)+
     '<div class="row" style="margin-top:14px"><button class="ghost" onclick="logout()">退出登录</button></div>');
+}
+function panelExtras(u){
+  var out='<h3>可用模型</h3><p class="sub">'+((u.models||[]).join('、')||'（暂无）')+'</p>';
+  var ks=(u.keys||[]);
+  out+='<h3>我的密钥</h3>';
+  if(ks.length){out+='<table>'+ks.map(function(k){return '<tr><td>'+esc(k.name)+'</td><td class="mono">'+esc(k.hint||'—')+'</td><td>'+(k.enabled?'启用':'停用')+'</td><td>'+(k.channel_group?('组 '+esc(k.channel_group)):'全组')+'</td></tr>';}).join('')+'</table>';}
+  else{out+='<p class="sub">（无）</p>';}
+  var rc=(u.recent||[]);
+  out+='<h3>最近消费</h3>';
+  if(rc.length){out+='<table><tr><th>时间</th><th>模型</th><th>状态</th><th>tokens</th><th>扣点</th></tr>'+
+    rc.map(function(e){var d=new Date((e.ts||0)*1000);return '<tr><td class="mono">'+d.toLocaleString()+'</td><td>'+esc(e.model||'-')+'</td><td>'+(e.ok?'成功':'失败')+'</td><td class="mono">'+(e.tokens_in||0)+'&rarr;'+(e.tokens_out||0)+'</td><td class="mono">'+(e.cost||0)+'</td></tr>';}).join('')+'</table>';}
+  else{out+='<p class="sub">（还没有调用记录）</p>';}
+  return out;
 }
 async function doRedeem(){err('');var j=await api('/api/user/redeem',{code:document.getElementById('code').value.trim()});
   if(!j.ok){err(j.error);return;}
@@ -989,6 +1003,51 @@ class RelayHandler(BaseHTTPRequestHandler):
         token_store.mutate(change)
         return secret
 
+    def _panel_models(self, user: Any) -> list[str]:
+        """名下启用令牌的渠道组并集对应的模型——「每用户不同模型列表」的落地。"""
+        groups = {
+            t.channel_group
+            for t in (self.tokens.pool.tokens if self.tokens else [])
+            if t.user_id == user.user_id and t.enabled and t.channel_group
+        }
+        try:
+            if groups:
+                merged: list[str] = []
+                for g in sorted(groups):
+                    for m in self.router.models(group=g):
+                        if m not in merged:
+                            merged.append(m)
+                return merged
+            return list(self.router.models())
+        except TypeError:
+            # 旧签名路由器（测试桩/第三方）：退回全量清单
+            return list(self.router.models())
+
+    def _panel_recent(self, user: Any) -> list[dict[str, Any]]:
+        """本人最近消费明细：按名下令牌名过滤请求日志，最多 15 条。"""
+        names = {
+            t.name
+            for t in (self.tokens.pool.tokens if self.tokens else [])
+            if t.user_id == user.user_id
+        }
+        if not names or not self.request_log:
+            return []
+        try:
+            entries = reqlog.tail(Path(self.request_log), limit=200)
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for e in entries:
+            if e.get("token") in names:
+                out.append({
+                    "ts": e.get("ts"), "model": e.get("model"),
+                    "ok": e.get("ok"), "tokens_in": e.get("tokens_in"),
+                    "tokens_out": e.get("tokens_out"), "cost": e.get("cost") or 0,
+                })
+            if len(out) >= 15:
+                break
+        return out
+
     def _handle_panel_api(self, path: str) -> None:
         """用户面板 API。/api/auth/* 无需会话；/api/user/* 需要会话。"""
         if self.users is None:
@@ -1110,6 +1169,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         cache_read: int = 0,
         cache_creation: int = 0,
         cost: int = 0,
+        upstream_cost: int = 0,
         channel: str = "",
         reason: str = "",
     ) -> None:
@@ -1166,6 +1226,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             cache_read=cache_read,
             cache_creation=cache_creation,
             cost=cost,
+            upstream_cost=upstream_cost,
             request_id=request_id,
             ip=ip,
             ident_user=ident.get("user", ""),
@@ -1740,6 +1801,15 @@ class RelayHandler(BaseHTTPRequestHandler):
                     "allow_register": pool.allow_register,
                     "api_key_hint": api_key_hint,
                     "unlimited": bool(fresh and fresh.quota < 0),
+                    # —— #20 面板增强：名下密钥 / 可见模型 / 本人消费明细 ——
+                    "keys": [
+                        {"name": t.name, "hint": t.token_hint, "enabled": t.enabled,
+                         "channel_group": t.channel_group}
+                        for t in (self.tokens.pool.tokens if self.tokens else [])
+                        if t.user_id == user.user_id
+                    ],
+                    "models": self._panel_models(user),
+                    "recent": self._panel_recent(user),
                 },
             )
             return
@@ -1998,7 +2068,14 @@ class RelayHandler(BaseHTTPRequestHandler):
         # 而且池子里的模型名和上游的模型名本来就不是一回事（要经过映射）。
         # 测试密钥例外：任意模型名都接（性能压测不在乎模型存不存在）。
         if not is_test:
-            known = self.router.models()
+            try:
+                known = self.router.models(
+                    group=(getattr(identity, "channel_group", "") or None)
+                )
+            except TypeError:
+                # 第三方/测试路由器还是旧签名：不认 group 参数就退回全量清单，
+                # 和 relay 调用点的降级同哲学——别让旧路由器把整个网关变 500。
+                known = self.router.models()
             if model not in known:
                 self._error(
                     404,
@@ -2443,7 +2520,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                     )
                     return
                 est_input = len(extract_prompt(body)) // 4
-                est_cost = self.users.pool.cost_of(fresh, est_input, 0)
+                est_cost = self.users.pool.cost_of(fresh, est_input, 0, ts=started)
                 if fresh.quota == 0 or (est_cost > 0 and fresh.quota < est_cost):
                     self._error(
                         429,
@@ -2462,7 +2539,8 @@ class RelayHandler(BaseHTTPRequestHandler):
 
             try:
                 outcome = router.relay(
-                    model, body, streaming, trace_headers=trace_headers, fp=fp
+                    model, body, streaming, trace_headers=trace_headers, fp=fp,
+                    group=(getattr(identity, "channel_group", "") or None),
                 )
             except TypeError as exc:
                 # 第三方路由器（测试/扩展）可能还是旧签名：不认 trace 参数就退回旧调用
@@ -2494,20 +2572,24 @@ class RelayHandler(BaseHTTPRequestHandler):
                 fresh = self.users.pool.get(identity.user_id)
                 if fresh is not None:
                     if ok:
-                        cost = self.users.pool.cost_of(fresh, tokens_in, tokens_out)
+                        cost = self.users.pool.cost_of(fresh, tokens_in, tokens_out, ts=started)
                         self.users.settle(identity.user_id, pre, cost)  # 多退少补
                     else:
                         # 流中断：上游已消费整段输入，按预扣额结清（不上浮也不退还）
                         # ——这才是预扣防刷的本意；真实网络抖动的损失由预扣上限封顶。
                         self.users.settle(identity.user_id, pre, pre)
                         cost = pre
+            up_cost = (
+                outcome.key.upstream_cost(tokens_in, tokens_out)
+                if getattr(outcome, "key", None) else 0
+            )
             self._record(identity, ok, tokens_in, tokens_out)
             self._log_request(
                 started=started, dialect=dialect, model=model, identity=identity,
                 ok=ok, stream=True, status=200,
                 tokens_in=tokens_in, tokens_out=tokens_out,
                 cache_read=cache_read, cache_creation=cache_creation,
-                cost=cost, channel=outcome.label,
+                cost=cost, upstream_cost=up_cost, channel=outcome.label,
                 reason="" if ok else "stream interrupted",
             )
             return
@@ -2529,10 +2611,14 @@ class RelayHandler(BaseHTTPRequestHandler):
         if identity is not None and identity.user_id and self.users:
             fresh = self.users.pool.get(identity.user_id)
             if fresh is not None:
-                cost = self.users.pool.cost_of(fresh, tokens_in, tokens_out)
+                cost = self.users.pool.cost_of(fresh, tokens_in, tokens_out, ts=started)
                 self.users.settle(identity.user_id, pre, cost)  # 多退少补
         # 记账赶在写响应之前：响应字节一出去，客户端就可能立刻断开，
         # 账还没落盘就被读到旧值（测试里表现为偶发丢一次）。
+        up_cost = (
+            outcome.key.upstream_cost(tokens_in, tokens_out)
+            if getattr(outcome, "key", None) else 0
+        )
         self._record(identity, True, tokens_in, tokens_out)
         if cache_key:
             self.response_cache.put(cache_key, outcome.message)
@@ -2541,7 +2627,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             ok=True, stream=False, status=200,
             tokens_in=tokens_in, tokens_out=tokens_out,
             cache_read=cache_read, cache_creation=cache_creation,
-            cost=cost, channel=outcome.label,
+            cost=cost, upstream_cost=up_cost, channel=outcome.label,
         )
         if dialect == "openai":
             self._send_json(200, openai_completion(model, outcome.message))

@@ -81,6 +81,7 @@ def record(
     cache_read: int = 0,
     cache_creation: int = 0,
     cost: int = 0,
+    upstream_cost: int = 0,
     request_id: str = "",
     ip: str = "",
     # 客户端身份（协议解出 / body 块兜底）。元数据，仍不含内容；
@@ -128,6 +129,8 @@ def record(
         entry["cache_creation"] = int(cache_creation)
     if cost:
         entry["cost"] = int(cost)  # 用户面板计费扣点（-1 = 扣费时余额已尽）
+    if upstream_cost:
+        entry["upstream_cost"] = int(upstream_cost)
     if reason:
         entry["reason"] = str(reason)[:120]
     try:
@@ -165,12 +168,14 @@ def summarize(entries: list[dict[str, Any]]) -> dict[str, Any]:
         buckets: dict[str, dict[str, int]] = {}
 
         def bump(name: str, e: dict[str, Any]) -> None:
-            slot = buckets.setdefault(str(name), {"requests": 0, "ok": 0, "failed": 0, "tokens_in": 0, "tokens_out": 0, "cache_read": 0})
+            slot = buckets.setdefault(str(name), {"requests": 0, "ok": 0, "failed": 0, "tokens_in": 0, "tokens_out": 0, "cache_read": 0, "cost": 0, "upstream_cost": 0})
             slot["requests"] += 1
             slot["ok" if e.get("ok") else "failed"] += 1
             slot["tokens_in"] += int(e.get("tokens_in") or 0)
             slot["tokens_out"] += int(e.get("tokens_out") or 0)
             slot["cache_read"] += int(e.get("cache_read") or 0)
+            slot["cost"] += int(e.get("cost") or 0)
+            slot["upstream_cost"] += int(e.get("upstream_cost") or 0)
 
         for e in entries:
             bump(e.get(key) or "-", e)
@@ -179,12 +184,14 @@ def summarize(entries: list[dict[str, Any]]) -> dict[str, Any]:
     day_buckets: dict[str, dict[str, int]] = {}
     for e in entries:
         day = time.strftime("%Y-%m-%d", time.localtime(float(e.get("ts") or 0)))
-        slot = day_buckets.setdefault(day, {"requests": 0, "ok": 0, "failed": 0, "tokens_in": 0, "tokens_out": 0, "cache_read": 0})
+        slot = day_buckets.setdefault(day, {"requests": 0, "ok": 0, "failed": 0, "tokens_in": 0, "tokens_out": 0, "cache_read": 0, "cost": 0, "upstream_cost": 0})
         slot["requests"] += 1
         slot["ok" if e.get("ok") else "failed"] += 1
         slot["tokens_in"] += int(e.get("tokens_in") or 0)
         slot["tokens_out"] += int(e.get("tokens_out") or 0)
         slot["cache_read"] += int(e.get("cache_read") or 0)
+        slot["cost"] += int(e.get("cost") or 0)
+        slot["upstream_cost"] += int(e.get("upstream_cost") or 0)
 
     ok_count = sum(1 for e in entries if e.get("ok"))
     latencies = [float(e["latency_ms"]) for e in entries if e.get("ok") and e.get("latency_ms")]
@@ -196,6 +203,9 @@ def summarize(entries: list[dict[str, Any]]) -> dict[str, Any]:
             "tokens_in": sum(int(e.get("tokens_in") or 0) for e in entries),
             "tokens_out": sum(int(e.get("tokens_out") or 0) for e in entries),
             "cache_read": sum(int(e.get("cache_read") or 0) for e in entries),
+            "revenue": sum(int(e.get("cost") or 0) for e in entries),
+            "upstream_cost": sum(int(e.get("upstream_cost") or 0) for e in entries),
+            "profit": sum(int(e.get("cost") or 0) - int(e.get("upstream_cost") or 0) for e in entries),
             "avg_latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else 0.0,
         },
         "by_token": _bucket("token"),
