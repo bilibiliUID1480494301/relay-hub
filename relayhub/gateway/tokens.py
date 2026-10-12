@@ -114,6 +114,10 @@ class DownstreamToken:
     # 分组标签（用户分组）：同一批设备/同一个人可归同组，管理台按组筛选与汇总。
     # 归一化：空白→default；长度≤32；非法字符折叠为 -。
     group: str = "default"
+    # 渠道路由组绑定：空 = 全部渠道组可见；非空 = 请求只路由到该组的上游，
+    # /v1/models 语义里该组外的模型一律 404「不存在」。与 group（用户分组
+    # 标签）是两回事：那个管统计筛选，这个管请求去哪。
+    channel_group: str = ""
     # SHA-256 哈希（落盘的唯一凭证形态）与尾 4 位提示。
     # token 字段是遗留明文：旧文件加载后内存里保留以兼容，**save 时一律清空**。
     token_hash: str = ""
@@ -162,6 +166,7 @@ class DownstreamToken:
             expires_at=float(raw.get("expires_at", 0.0) or 0.0),
             user_id=str(raw.get("user_id") or ""),
             group=str(raw.get("group") or "default"),
+            channel_group=str(raw.get("channel_group") or ""),
             token_hash=str(raw.get("token_hash", "")),
             token_hint=str(raw.get("token_hint", "")),
             note=str(raw.get("note", "")),

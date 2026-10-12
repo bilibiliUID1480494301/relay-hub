@@ -91,15 +91,20 @@ LOGIN_HTML = """<!doctype html>
  <h1>relay-hub 号池管理 · Key Pool Admin</h1>
  <label>管理面 token / Admin token</label>
  <input id="token" type="password" autofocus>
+ <label>动态码 / TOTP（未启用留空）</label>
+ <input id="totp" inputmode="numeric" autocomplete="one-time-code">
  <div class="err" id="err"></div>
  <button type="submit">登录 / Sign in</button>
 </form>
 <script>
 async function doLogin(){
   const r = await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({token:document.getElementById('token').value})});
+    body:JSON.stringify({token:(function(){
+      var t=document.getElementById('token').value;
+      var c=document.getElementById('totp').value.trim();
+      return c ? t+':'+c : t;})()});
   if(r.ok){location.href='/';return false;}
-  document.getElementById('err').textContent = r.status===401 ? 'token 不正确' : ('登录失败：HTTP '+r.status);
+  document.getElementById('err').textContent = r.status===401 ? 'token 或动态码不正确' : ('登录失败：HTTP '+r.status);
   return false;
 }
 </script></body></html>"""
@@ -120,6 +125,7 @@ def public_key(key: UpstreamKey, now: float) -> dict[str, Any]:
     return {
         "key_id": key.key_id,
         "priority": key.priority,
+        "group": key.group,
         "model_mapping": key.model_mapping,
         "label": key.label,
         "protocol": key.protocol,
@@ -216,6 +222,8 @@ def _apply_user_settings(
     price_in=None,
     price_out=None,
     groups=None,
+    peak_hours=None,
+    peak_multiplier=None,
 ) -> None:
     """计费规则/注册开关的 PUT 应用。None = 不改。"""
     if allow_register is not None:
@@ -230,6 +238,15 @@ def _apply_user_settings(
         cleaned = {str(k).strip(): max(0.0, float(v)) for k, v in groups.items() if str(k).strip()}
         if cleaned:
             pool.groups = cleaned
+    if peak_hours is not None:
+        try:
+            pool.peak_hours = {
+                int(h) for h in (peak_hours or []) if 0 <= int(h) <= 23
+            }
+        except (TypeError, ValueError):
+            pass
+    if peak_multiplier is not None:
+        pool.peak_multiplier = max(1.0, float(peak_multiplier))
 
 
 class AdminHandler(BaseHTTPRequestHandler):
@@ -278,7 +295,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         if not supplied:
             query = parse_qs(urlsplit(self.path).query)
             supplied = (query.get("token") or [""])[0]
-        if supplied and hmac.compare_digest(supplied, self.token):
+        if supplied and self.server._token_ok(supplied):  # type: ignore[attr-defined]
             return True
         # 登录会话：浏览器登录一次后用 HttpOnly cookie，免去把 token 长期挂在 URL 里
         return self._session_valid()
@@ -330,8 +347,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         if body is None:
             return
         supplied = str(body.get("token") or "")
-        if not supplied or not hmac.compare_digest(supplied, self.token):
-            self._error(401, "token 不正确")
+        if not supplied or not self.server._token_ok(supplied):  # type: ignore[attr-defined]
+            self._error(401, "token 或动态码不正确")
             return
         sid = self._start_session()
         self.send_response(200)
@@ -569,6 +586,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                     "model_windows": windows,
                     "model_mapping": mapping,
                     "priority": int(body.get("priority") or 0),
+                    "group": str(body.get("group") or "").strip() or "default",
+                    "cost_multiplier": float(body.get("cost_multiplier") if body.get("cost_multiplier") not in (None, "") else 1.0),
+                    "price_in_per_1k": float(body.get("price_in_per_1k") or 0.0),
+                    "price_out_per_1k": float(body.get("price_out_per_1k") or 0.0),
                     "note": body.get("note") or "",
                 }
             )
@@ -627,6 +648,14 @@ class AdminHandler(BaseHTTPRequestHandler):
                 key.model_mapping = mapping
             if body.get("priority") is not None:
                 key.priority = int(body["priority"] or 0)
+            if body.get("group") is not None:
+                key.group = str(body["group"] or "").strip() or "default"
+            if body.get("cost_multiplier") is not None:
+                key.cost_multiplier = float(body["cost_multiplier"] or 0.0)
+            if body.get("price_in_per_1k") is not None:
+                key.price_in_per_1k = float(body["price_in_per_1k"] or 0.0)
+            if body.get("price_out_per_1k") is not None:
+                key.price_out_per_1k = float(body["price_out_per_1k"] or 0.0)
             if body.get("note") is not None:
                 key.note = str(body["note"])
             if body.get("weight") is not None:
@@ -767,6 +796,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             "price_in_per_1k": pool.price_in_per_1k,
             "price_out_per_1k": pool.price_out_per_1k,
             "groups": pool.groups,
+            "peak_hours": sorted(getattr(pool, "peak_hours", set()) or set()),
+            "peak_multiplier": getattr(pool, "peak_multiplier", 1.0),
             "users": [
                 {
                     "user_id": u.user_id,
@@ -818,6 +849,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                         price_in=body.get("price_in_per_1k"),
                         price_out=body.get("price_out_per_1k"),
                         groups=body.get("groups"),
+                        peak_hours=body.get("peak_hours"),
+                        peak_multiplier=body.get("peak_multiplier"),
                     )
                 )
                 self._send_json(200, self._users_state())
@@ -1334,6 +1367,7 @@ class AdminServer(ThreadingHTTPServer):
         address: tuple[str, int],
         pool_path: Path,
         token: str | None = None,
+        totp_secret: str = "",
         verbose: bool = False,
         audit_path: Path | None = None,
         tokens_path: Path | None = None,
@@ -1351,6 +1385,9 @@ class AdminServer(ThreadingHTTPServer):
         super().__init__(address, AdminHandler)
         self.pool_path = Path(pool_path)
         self.token = token
+        # TOTP 动态密码（RFC 6238，base32 密钥）：非空时登录须提供
+        # 「token:6位动态码」。管理面可以动态，用户密码永远静态（防锁死）。
+        self.totp_secret = (totp_secret or "").strip()
         self.verbose = verbose
         self.audit_path = audit_path or paths.audit_path()
         # 统一控制台的数据面：令牌 / 请求明细（默认走标准数据根）
@@ -1372,6 +1409,29 @@ class AdminServer(ThreadingHTTPServer):
         self.sessions: dict[str, float] = {}
         self.session_lock = threading.Lock()
 
+    def _token_ok(self, supplied: str) -> bool:
+        """静态比对；启用 TOTP 后要求 `token:6位动态码`，±1 步容错。"""
+        if not self.totp_secret:
+            return hmac.compare_digest(supplied, self.token or "")
+        base, _, code = supplied.partition(":")
+        if not code or not hmac.compare_digest(base, self.token or ""):
+            return False
+        return self._totp_verify(code)
+
+    def _totp_verify(self, code: str, *, window: int = 1) -> bool:
+        import base64 as _b64
+
+        from .toip import totp_at
+
+        try:
+            secret = _b64.b32decode(self.totp_secret, casefold=True)
+        except Exception:
+            return False
+        now = time.time()
+        for drift in range(-window, window + 1):
+            if hmac.compare_digest(totp_at(secret, at=now + drift * 30), code):
+                return True
+        return False
 
     @property
     def url(self) -> str:
@@ -1392,6 +1452,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="管理面凭证；绑非回环地址时必填。页面用 ?token=… 打开",
     )
+    parser.add_argument(
+        "--totp-secret",
+        default="",
+        help="base32 TOTP 密钥；设置后登录须「token:6位动态码」（认证器 App 生成）",
+    )
     parser.add_argument("--open", action="store_true", dest="open_browser", help="启动后自动打开浏览器")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -1407,7 +1472,10 @@ def main(argv: list[str] | None = None) -> int:
         KeyPool([]).save(pool_path)
 
     try:
-        server = AdminServer((args.host, args.port), pool_path, args.token, args.verbose)
+        server = AdminServer(
+            (args.host, args.port), pool_path, args.token,
+            totp_secret=args.totp_secret, verbose=args.verbose,
+        )
     except ValueError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
@@ -1581,6 +1649,10 @@ display:none;border:1px solid var(--line);background:var(--panel)}
       placeholder="glm-5.2:1000000, qwen3-32b　（留空 = 对全部模型开放）"></label>
     <label class="wide">模型映射 <input id="f-mapping"
       placeholder="对外名=上游名, 如 glm-5.2=[满血]GLM-5.2　（留空 = 不映射）"></label>
+    <label>渠道组 <input id="f-group" placeholder="default（free/paid/stable…）"></label>
+    <label>成本倍率 <input id="f-cmul" type="number" step="0.1" placeholder="1.0（免费填 0）"></label>
+    <label>上游输入价/1k <input id="f-pin" type="number" step="0.001" placeholder="0 = 未配价"></label>
+    <label>上游输出价/1k <input id="f-pout" type="number" step="0.001" placeholder="0 = 未配价"></label>
     <label>优先级 <input id="f-priority" type="number" step="1" placeholder="0"></label>
     <label class="wide">备注 <input id="f-note"></label>
   </div>
@@ -1651,6 +1723,8 @@ display:none;border:1px solid var(--line);background:var(--panel)}
     <label>输入 价/1k tokens <input id="u-price-in" type="number" min="0" step="0.1" style="min-width:100px"></label>
     <label>输出 价/1k tokens <input id="u-price-out" type="number" min="0" step="0.1" style="min-width:100px"></label>
     <label>分组倍率 <input id="u-groups" placeholder='default=1, vip=0.5'></label>
+    <label>峰时小时 <input id="u-peak-hours" placeholder="9,10,..,21（空 = 不启用分时）"></label>
+    <label>峰时倍率 <input id="u-peak-mult" type="number" min="1" step="0.1" style="min-width:90px"></label>
     <button id="u-save-settings">保存规则</button>
   </div>
   <p class="hint">成本 = (输入/1k×输入价 + 输出/1k×输出价) × 分组倍率，向上取整，成功才扣。
@@ -1889,6 +1963,7 @@ function render(){
       '<td class="mono">'+esc(k.protocol)+'</td>'+
       '<td>'+statusTag(k)+
       (k.priority?'<div><span class="tag t-off">优先级 '+k.priority+'</span></div>':'')+
+      (k.group&&k.group!=='default'?'<div><span class="tag">组 '+esc(k.group)+'</span></div>':'')+
       (k.model_mapping&&Object.keys(k.model_mapping).length?'<div><span class="tag t-off">映射×'+Object.keys(k.model_mapping).length+'</span></div>':'')+
       err+'</td>'+
       '<td>'+models+'</td>'+
@@ -1937,12 +2012,16 @@ function formBody(){
     models_text:document.getElementById('f-models').value,
     mapping_text:document.getElementById('f-mapping').value,
     priority:parseInt(document.getElementById('f-priority').value,10)||0,
+    group:document.getElementById('f-group').value.trim(),
+    cost_multiplier:parseFloat(document.getElementById('f-cmul').value)||0,
+    price_in_per_1k:parseFloat(document.getElementById('f-pin').value)||0,
+    price_out_per_1k:parseFloat(document.getElementById('f-pout').value)||0,
     note:document.getElementById('f-note').value.trim()
   };
 }
 
 function clearForm(){
-  ['f-label','f-base-url','f-api-key','f-models','f-mapping','f-priority','f-note'].forEach(function(id){
+  ['f-label','f-base-url','f-api-key','f-models','f-mapping','f-group','f-cmul','f-pin','f-pout','f-priority','f-note'].forEach(function(id){
     document.getElementById(id).value='';});
   editing=null;render();
 }
@@ -1957,6 +2036,10 @@ function startEdit(k){
     var w=k.model_windows[m];return w?(m+':'+w):m;}).join(', ');
   document.getElementById('f-mapping').value=Object.keys(k.model_mapping||{}).map(function(p){
     return p+'='+k.model_mapping[p];}).join(', ');
+  document.getElementById('f-group').value=k.group||'default';
+  document.getElementById('f-cmul').value=k.cost_multiplier!=null?k.cost_multiplier:1;
+  document.getElementById('f-pin').value=k.price_in_per_1k||0;
+  document.getElementById('f-pout').value=k.price_out_per_1k||0;
   document.getElementById('f-priority').value=k.priority||0;
   document.getElementById('f-note').value=k.note||'';
   render();
@@ -2106,6 +2189,8 @@ function loadUsers(){
     document.getElementById('u-default').value=s.default_quota;
     document.getElementById('u-price-in').value=s.price_in_per_1k;
     document.getElementById('u-price-out').value=s.price_out_per_1k;
+    document.getElementById('u-peak-hours').value=(s.peak_hours||[]).join(',');
+    document.getElementById('u-peak-mult').value=s.peak_multiplier!=null?s.peak_multiplier:1;
     document.getElementById('u-groups').value=Object.keys(s.groups).map(function(g){
       return g+'='+s.groups[g];}).join(', ');
     var rows=s.users.map(function(u){
@@ -2140,7 +2225,9 @@ document.getElementById('u-save-settings').onclick=function(){
     default_quota:parseInt(document.getElementById('u-default').value,10)||0,
     price_in_per_1k:parseFloat(document.getElementById('u-price-in').value)||0,
     price_out_per_1k:parseFloat(document.getElementById('u-price-out').value)||0,
-    groups:groups
+    groups:groups,
+    peak_hours:document.getElementById('u-peak-hours').value.split(',').map(function(x){return parseInt(x.trim(),10);}).filter(function(x){return x>=0&&x<=23;}),
+    peak_multiplier:parseFloat(document.getElementById('u-peak-mult').value)||1
   }).then(function(){toast('计费规则已保存，网关热加载生效',true);})
     .catch(function(e){toast('保存失败：'+e.message,false);});
 };
@@ -2400,7 +2487,9 @@ function loadUsage(){
     document.getElementById('u-cards').innerHTML=
       card('请求',w.requests)+card('成功',w.ok)+card('失败',w.failed)+
       card('tokens 输入',w.tokens_in)+card('tokens 输出',w.tokens_out)+
-      card('平均耗时',w.avg_latency_ms+'ms');
+      card('平均耗时',w.avg_latency_ms+'ms')+
+      card('收入(点)',w.revenue||0)+card('上游成本(点)',w.upstream_cost||0)+
+      card('利润(点)',w.profit||0);
     fillUsageTable('u-token',s.requests.by_token);
     fillUsageTable('u-model',s.requests.by_model);
     fillUsageTable('u-channel',s.requests.by_channel);

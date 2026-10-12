@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -148,6 +149,16 @@ class UpstreamKey:
     # 才落到低优先级——「主/备」语义。
     priority: int = 0
     weight: int = 1
+    # 渠道路由组（new-api channel group 语义）：free/paid/stable…自定义。
+    # 同一模型出现在多个组时各组独立调度，**绝不跨组自动 failover**——
+    # 「免费上游挂了自动切付费」这种归一化是事故不是容错。
+    group: str = "default"
+    # 成本核算（对标 new-api 的渠道倍率）：上游真实单价（每 1k tokens）与成本
+    # 倍率。两个价全 0 = 成本未知（报表按 0，但语义是「没配价」不是「免费」）；
+    # 免费上游显式 cost_multiplier=0.0。
+    cost_multiplier: float = 1.0
+    price_in_per_1k: float = 0.0
+    price_out_per_1k: float = 0.0
     enabled: bool = True
     note: str = ""
     auth_mode: str = AUTH_MODE_AUTO
@@ -196,6 +207,25 @@ class UpstreamKey:
     def cooling_down_for(self, now: float) -> float:
         return max(0.0, self.disabled_until - now)
 
+    def upstream_cost(self, tokens_in: int, tokens_out: int) -> int:
+        """本次转发在上游的成本估计（点，向上取整）。
+
+        成本 = (in/1000*price_in + out/1000*price_out) × cost_multiplier。
+        单价未配置（两个价都 0）→ 0：语义是「没配价，算不出」，报表不要
+        把它当成 0 成本利润。免费渠道（倍率 <=0）→ 恒 0。
+        """
+        if self.cost_multiplier <= 0:
+            return 0
+        if not self.price_in_per_1k and not self.price_out_per_1k:
+            return 0
+        base = (
+            tokens_in / 1000.0 * self.price_in_per_1k
+            + tokens_out / 1000.0 * self.price_out_per_1k
+        )
+        if base <= 0:
+            return 0
+        return max(1, math.ceil(base * self.cost_multiplier))
+
     # -- 序列化 ----------------------------------------------------------
 
     def to_dict(self) -> dict:
@@ -221,6 +251,10 @@ class UpstreamKey:
                 str(k): int(v) for k, v in (raw.get("model_windows") or {}).items()
             },
             weight=int(raw.get("weight", 1)),
+            group=str(raw.get("group") or "default"),
+            cost_multiplier=float(raw.get("cost_multiplier", 1.0) or 0.0),
+            price_in_per_1k=float(raw.get("price_in_per_1k", 0.0) or 0.0),
+            price_out_per_1k=float(raw.get("price_out_per_1k", 0.0) or 0.0),
             enabled=bool(raw.get("enabled", True)),
             note=str(raw.get("note", "")),
             auth_mode=str(raw.get("auth_mode") or AUTH_MODE_AUTO),
@@ -362,13 +396,18 @@ class KeyPool:
 
     # -- 候选排序 --------------------------------------------------------
 
-    def candidates(self, model: str, strategy: str | None = None) -> list[UpstreamKey]:
+    def candidates(
+        self, model: str, strategy: str | None = None, group: str | None = None
+    ) -> list[UpstreamKey]:
         """返回可用候选。语义对标 new-api：
         先按 priority 从高到低分组（高优先级全灭才轮到低优先级），
         组内再按策略（round_robin / least_failures / most_credits）排序。
         """
         now = self._clock()
         usable = [k for k in self.keys if k.supports(model) and k.is_available(now)]
+        if group:
+            # 组隔离：组内全灭就明说（503），不悄悄去别的组抓替身。
+            usable = [k for k in usable if k.group == group]
         if not usable:
             return []
         chosen = strategy or self.strategy
@@ -405,7 +444,11 @@ class KeyPool:
                 ordered.extend(order_group(group))
         return ordered
 
-    def all_models(self) -> list[str]:
+    def groups(self) -> list[str]:
+        """启用中的 Key 覆盖的渠道组（排序去重）。"""
+        return sorted({k.group for k in self.keys if k.enabled})
+
+    def all_models(self, group: str | None = None) -> list[str]:
         """启用中的 Key 的模型并集（去重、保持顺序）。
 
         已禁用的 Key 不进清单：/v1/models 是给客户端拉模型用的，
@@ -415,6 +458,8 @@ class KeyPool:
         seen: list[str] = []
         for key in self.keys:
             if not key.enabled:
+                continue
+            if group and key.group != group:
                 continue
             for model in key.public_models():
                 if model not in seen:

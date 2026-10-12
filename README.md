@@ -658,6 +658,17 @@ Or from Python: `hubrelay.doctor(port=8799)` → list of `{name, ok, detail, fix
   `toip station --force`——已发出的会话令牌不受影响。
 - 遇到疑似密钥泄露请立即吊销（`token rm` / 更换上游 Key）。
 
+## 文档目录 docs/
+
+| 文档 | 内容 |
+|------|------|
+| [docs/API.md](docs/API.md) | Python API 完整函数列表（建站 / 客户端 / E2E / 渠道池 / 令牌 / 用户与额度） |
+| [docs/ADMIN.md](docs/ADMIN.md) | 管理面使用与页面自定义（CSS 主题令牌、TOTP 动态管理密码、管理面 API 一览） |
+| [docs/PRICING.md](docs/PRICING.md) | 计费规则（标价 / 分组倍率 / 分时峰谷 / 上游成本倍率 / 利润报表 / 渠道分组 / 兑换码） |
+| [docs/CLIENT-SDK.md](docs/CLIENT-SDK.md) | 客户端 SDK 接入指南 |
+| [docs/E2E-ENCRYPTION.md](docs/E2E-ENCRYPTION.md) | 端到端加密说明 |
+| [docs/TOIP.md](docs/TOIP.md) | TOIP 线协议规范（中英对照） |
+
 ## Disclaimer 免责声明
 
 > **English**: This project is provided for learning, research, and personal

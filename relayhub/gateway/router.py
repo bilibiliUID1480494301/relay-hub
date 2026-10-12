@@ -59,6 +59,9 @@ class RelayOutcome:
     events: Iterator[tuple[str, dict[str, Any]]] | None = None
     attempts: list[str] = field(default_factory=list)
     usage: _TokenSink | None = None
+    # 实际服务的上游 Key：service 层用它算 upstream_cost（成本入账）。
+    # None = 测试/第三方路由器没带，成本按 0 处理。
+    key: Any = None
 
 
 class _TokenSink:
@@ -127,10 +130,13 @@ class KeyPoolRouter:
 
     # -- 对外 ------------------------------------------------------------
 
-    def models(self) -> dict[str, int]:
-        """模型 → 上下文长度（0 表示该 Key 没声明，不要当成真的 0）。"""
+    def models(self, group: str | None = None) -> dict[str, int]:
+        """模型 → 上下文长度（0 表示该 Key 没声明，不要当成真的 0）。
+
+        group 非空时只列该渠道组的模型——下游令牌绑组后可见性的根。
+        """
         windows = self.pool.model_windows()
-        return {model: windows.get(model, 0) for model in self.pool.all_models()}
+        return {model: windows.get(model, 0) for model in self.pool.all_models(group)}
 
     def relay(
         self,
@@ -139,8 +145,9 @@ class KeyPoolRouter:
         stream: bool,
         trace_headers: dict[str, str] | None = None,
         fp: str | None = None,
+        group: str | None = None,
     ) -> RelayOutcome:
-        candidates = self.pool.candidates(model)
+        candidates = self.pool.candidates(model, group=group)
         if not candidates:
             declared = any(key.supports(model) for key in self.pool.keys)
             raise RouterError(
@@ -243,7 +250,8 @@ class KeyPoolRouter:
         if isinstance(reply.message, dict) and reply.message.get("model"):
             reply.message["model"] = model  # 响应里的模型名翻回对外名
         return RelayOutcome(
-            label=key.label, model=model, message=reply.message, attempts=list(attempts)
+            label=key.label, model=model, message=reply.message, attempts=list(attempts),
+            key=key,
         )
 
     def _relay_stream(
@@ -272,6 +280,7 @@ class KeyPoolRouter:
         _first, events = upstream.peek_first(events)
         return RelayOutcome(
             label=key.label,
+            key=key,
             model=model,
             events=self._guard(key, self._public_model(events, model, sink), sink),
             attempts=list(attempts),
