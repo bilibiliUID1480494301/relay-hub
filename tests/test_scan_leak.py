@@ -25,6 +25,14 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCANNER = REPO_ROOT / "scan_leak.py"
 
+# sdist 会把 tests/ 一起打包，但**不含**仓根的 scan_leak.py（它不随包发布）。
+# 于是从这个测试文件在 sdist 里运行时，扫描器根本不存在——直接跳过，
+# 而不是抛一堆 FileNotFoundError 让下游以为是包坏了。
+pytestmark = pytest.mark.skipif(
+    not SCANNER.is_file(),
+    reason="scan_leak.py 不在（从 sdist 运行的正常情况，它是仓库自带的开发工具）",
+)
+
 
 def _load_scanner():
     spec = importlib.util.spec_from_file_location("scan_leak_under_test", SCANNER)
@@ -60,7 +68,11 @@ def _tar_gz(tmp_path: Path, name: str, members: dict[str, str]) -> Path:
 
 def test_detects_local_path_in_zip(scanner, tmp_path: Path) -> None:
     """zip/wheel 里的本机绝对路径必须被拦——这正是曾经漏掉的那一类。"""
-    path = _zip(tmp_path, "leaky.zip", {"pkg/mod.py": 'TMP = "C:/Users/alice/dev/x"\n'})
+    # 路径用片段拼接：明文写一个形如本机路径的串，本测试文件自己就会命中
+    # localpath 规则。sdist 会把 tests/ 一起打包发出去，那就等于把要防的
+    # 东西写进了产物（发布闸门当场 BLOCK 把这条抓出来，才有这段注释）。
+    fake = "C:" + "/Users/" + "alice/dev/x"
+    path = _zip(tmp_path, "leaky.zip", {"pkg/mod.py": 'TMP = "%s"\n' % fake})
     assert scanner.scan(str(path)) > 0, "扫描器假阴性：zip 成员内容根本没被读到"
 
 
@@ -80,7 +92,8 @@ def test_detects_credentials_and_hostname(scanner, tmp_path: Path) -> None:
 
 def test_detects_in_tar_gz(scanner, tmp_path: Path) -> None:
     """sdist（tar.gz）路径同样要工作（走 extractfile 的文件对象分支）。"""
-    path = _tar_gz(tmp_path, "leaky.tar.gz", {"pkg/m.py": 'P = "C:/Users/bob/dev/y"\n'})
+    fake = "C:" + "/Users/" + "bob/dev/y"
+    path = _tar_gz(tmp_path, "leaky.tar.gz", {"pkg/m.py": 'P = "%s"\n' % fake})
     assert scanner.scan(str(path)) > 0
 
 
@@ -131,7 +144,8 @@ def test_scanner_source_does_not_enumerate_internal_names() -> None:
 
 def test_cli_exit_codes(tmp_path: Path) -> None:
     """BLOCK 走非 0、CLEAN 走 0——CI 靠退出码卡门。"""
-    leaky = _zip(tmp_path, "l.zip", {"pkg/a.py": 'x = "C:/Users/alice/dev/z"\n'})
+    fake = "C:" + "/Users/" + "alice/dev/z"
+    leaky = _zip(tmp_path, "l.zip", {"pkg/a.py": 'x = "%s"\n' % fake})
     clean = _zip(tmp_path, "c.zip", {"pkg/a.py": "x = 1\n"})
     env = {k: v for k, v in os.environ.items() if k != "RELAYHUB_LEAK_EXTRA"}
 
