@@ -325,7 +325,13 @@ class KeyPool:
     def load(cls, path: Path, **kwargs: object) -> "KeyPool":
         if not Path(path).is_file():
             return cls([], **kwargs)  # type: ignore[arg-type]
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            # 半截/被删的号池文件：返回空池而不是抛错。调用方（ReloadingRouter）已在
+            # 指纹层判过「读不到 ≠ 配置变了」，这里的兜底是最后一道防线——
+            # 宁可暂时无渠道（502），也不能把并发请求打成 500。
+            return cls([], **kwargs)  # type: ignore[arg-type]
         keys = [UpstreamKey.from_dict(item) for item in raw.get("keys", [])]
         merged = {
             "strategy": raw.get("strategy", STRATEGY_ROUND_ROBIN),

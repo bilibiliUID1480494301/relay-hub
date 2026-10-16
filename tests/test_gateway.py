@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import threading
 import time
@@ -16,7 +17,15 @@ import pytest
 from relayhub.gateway import conformance, reqlog
 from relayhub.gateway.pool import KeyPool
 from relayhub.gateway.router import KeyPoolRouter
-from relayhub.gateway.service import Channel, ChannelPool, DemoRouter, RelayServer, demo_pool, demo_router
+from relayhub.gateway.service import (
+    RELAY_LOOP_STATUS,
+    Channel,
+    ChannelPool,
+    DemoRouter,
+    RelayServer,
+    demo_pool,
+    demo_router,
+)
 from relayhub.gateway.tokens import DownstreamToken, TokenPool, TokenStore
 from tests.support import FakeUpstream, make_key
 
@@ -592,7 +601,7 @@ def test_loop_guard_counts_and_rejects() -> None:
 
 
 def test_self_loop_terminates_quickly(tmp_path: Path) -> None:
-    """渠道指向自己：内层请求同指纹在飞 +1 超阈值 → 508 打断，外层 502。
+    """渠道指向自己：内层请求同指纹在飞 +1 超阈值 → 判环拒掉，外层 502。
 
     关键断言是「快速失败」——没有防护时这个拓扑会互相等超时（120s×N）。
     """
@@ -631,7 +640,7 @@ def test_self_loop_terminates_quickly(tmp_path: Path) -> None:
         except urllib.error.HTTPError as exc:
             status = exc.code
         # 环被检测并打断：外层拿不到 200，且没有挂到超时（timeout=15 远小于上游 120s）
-        assert status in (502, 508), status
+        assert status in (502, RELAY_LOOP_STATUS), status
     finally:
         server.shutdown()
         server.server_close()
@@ -648,7 +657,7 @@ def test_is_self_reference_guard() -> None:
 
 
 def test_loop_via_headers_rejected() -> None:
-    """Via 含本站实例标记 或 Hops>=4 → 入口直接 508（最强的环路信号）。"""
+    """Via 含本站实例标记 或 Hops>=4 → 入口直接判环拒掉（最强的环路信号）。"""
     import urllib.error
     import urllib.request
 
@@ -668,7 +677,7 @@ def test_loop_via_headers_rejected() -> None:
                 status = response.status
         except urllib.error.HTTPError as exc:
             status = exc.code
-        assert status == 508
+        assert status == RELAY_LOOP_STATUS
         # Hops 超限
         request = urllib.request.Request(f"{server.base_url}/v1/messages", data=body, method="POST")
         request.add_header("Content-Type", "application/json")
@@ -678,7 +687,7 @@ def test_loop_via_headers_rejected() -> None:
                 status = response.status
         except urllib.error.HTTPError as exc:
             status = exc.code
-        assert status == 508
+        assert status == RELAY_LOOP_STATUS
         # 正常请求不受影响
         request = urllib.request.Request(f"{server.base_url}/v1/messages", data=body, method="POST")
         request.add_header("Content-Type", "application/json")
@@ -788,3 +797,156 @@ def test_request_log_records_ip_and_req_id(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+# ================================================================ D9/D10 可观测性与信息泄露
+
+
+def test_response_carries_request_id(relay: str) -> None:
+    """每个响应都要回带 X-Request-ID，客户端报障时有凭据可引用。
+
+    此前请求 id 只往上游和日志流：客户端拿到一个 500 时什么都引不了，
+    客服问「哪个请求」，用户只能答「刚才那次」。有了这个头，日志里能一刀定位。
+    """
+    probe = conformance.Probe(relay, API_KEY)
+    response = probe.post(
+        "/v1/messages", {"model": "glm-5.2", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]}
+    )[0]
+    assert response.status == 200
+    rid = response.headers.get("x-request-id")
+    assert rid and len(rid) <= 64, f"响应缺 X-Request-ID：{response.headers}"
+
+
+def test_client_supplied_request_id_is_echoed(relay: str) -> None:
+    """客户端自己带了 id 就原样回——链路两端要对得齐。"""
+    # Probe 不带自定义头的口子，这里直接用 http.client（不为此扩 Probe 的公共面）。
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(relay)
+    connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=10)
+    body = json.dumps({
+        "model": "glm-5.2", "max_tokens": 8, "messages": [],
+    }).encode("utf-8")
+    connection.request(
+        "POST", f"{parts.path}/v1/messages", body=body,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": API_KEY,
+            "X-Request-ID": "client-chosen-id-42",
+        },
+    )
+    response = connection.getresponse()
+    response.read()
+    headers = {k.lower(): v for k, v in response.getheaders()}
+    connection.close()
+    assert response.status == 200
+    assert headers.get("x-request-id") == "client-chosen-id-42"
+
+
+def test_early_error_also_carries_request_id(relay: str) -> None:
+    """早期错误（未知路径 / 401 / 404）也必须带 id——那才是最需要申诉的几类。"""
+    probe = conformance.Probe(relay, API_KEY)
+    # 未知路径：在 request_id 生成点之前的错误路径
+    response = probe.post("/v1/does-not-exist", {"model": "glm-5.2"})[0]
+    assert response.status == 404
+    assert response.headers.get("x-request-id")
+
+    # 鉴权失败
+    response = probe.post(
+        "/v1/messages", {"model": "glm-5.2", "max_tokens": 8, "messages": []}, with_auth=False
+    )[0]
+    assert response.status == 401
+    assert response.headers.get("x-request-id")
+
+
+def test_stream_response_carries_request_id(relay: str) -> None:
+    """流式（最常见路径）同样要回带。"""
+    probe = conformance.Probe(relay, API_KEY)
+    response = probe.post(
+        "/v1/messages",
+        {"model": "glm-5.2", "max_tokens": 8, "stream": True,
+         "messages": [{"role": "user", "content": "hi"}]},
+        read_stream=True,
+    )[0]
+    assert response.status == 200
+    assert response.headers.get("x-request-id")
+
+
+def test_server_header_hides_python_version(relay: str) -> None:
+    """Server 头不许带 Python 版本。
+
+    `BaseHTTPRequestHandler.version_string()` 默认拼上 sys_version
+    （"Python/3.11.9"），等于把解释器版本广播给每个客户端——扫端口的人
+    拿它直接查该版本有哪些 CVE 可用。版本号要报，但只报我们自己的。
+    """
+    probe = conformance.Probe(relay, API_KEY)
+    response = probe.post(
+        "/v1/messages", {"model": "glm-5.2", "max_tokens": 8, "messages": []}
+    )[0]
+    server_header = response.headers.get("server", "")
+    assert server_header, "没有 Server 头"
+    assert "python" not in server_header.lower(), f"泄露解释器版本：{server_header!r}"
+    assert server_header.startswith("relayhub/"), f"版本号应跟随包版本：{server_header!r}"
+
+
+def test_server_version_follows_package(relay: str) -> None:
+    """Server 头的版本必须跟包版本单一来源，不许再写死。"""
+    from relayhub import __version__
+
+    probe = conformance.Probe(relay, API_KEY)
+    response = probe.post(
+        "/v1/messages", {"model": "glm-5.2", "max_tokens": 8, "messages": []}
+    )[0]
+    assert f"relayhub/{__version__}" == response.headers.get("server")
+
+
+# ================================================================ D7 CLI 暴露 loop-limit
+
+
+def test_cli_serve_passes_loop_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--loop-limit` 必须真的传到 RelayServer（0.9.0 建了构造参数却忘接 CLI）。
+
+    loop_limit 是判环阈值，多级中转链路长或并发重试多的部署要能调——
+    接不上就只能永远用默认 3。这里不起真服务：把 RelayServer 换成记录
+    参数的替身，只看 kwargs。
+    """
+    import os
+
+    from relayhub.gateway import __main__ as cli_module
+
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("RELAYHUB_HOME", str(home))
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parent.parent))
+
+    captured: dict = {}
+
+    class _StubServer:
+        def __init__(self, address: tuple, router: object, **kwargs: object) -> None:
+            captured.update(kwargs)
+            self.base_url = "http://127.0.0.1:0"
+
+        def serve_forever(self) -> None:  # 立刻返回，别真跑
+            return
+
+        def server_close(self) -> None:
+            return
+
+    monkeypatch.setattr(cli_module, "RelayServer", _StubServer)
+    monkeypatch.setattr(cli_module.threading, "Thread", lambda *a, **k: _NoopThread())
+
+    assert cli_module.main(["serve", "--port", "0", "--loop-limit", "7"]) == 0
+    assert captured.get("loop_limit") == 7, f"--loop-limit 没接到 RelayServer：{captured.get('loop_limit')!r}"
+
+    # 默认值也必须原样透传（不传 flag = 用构造默认 3）
+    captured.clear()
+    assert cli_module.main(["serve", "--port", "0"]) == 0
+    assert captured.get("loop_limit") == 3
+
+
+class _NoopThread:
+    def start(self) -> None:
+        return
+
+    def join(self, timeout: float | None = None) -> None:
+        return

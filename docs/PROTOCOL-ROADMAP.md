@@ -49,9 +49,9 @@ accounting are data-plane features and apply unchanged.
   per channel (the same plugin-logs discipline as LLM calls); upstream errors
   surface as JSON-RPC errors, never as crashes.
   每次 tools/call 按下游令牌与渠道双维记账（与 LLM 的插件日志同一纪律）。
-* **Already half-built / 已有雏形**: the InHouseSearch MCP integration
-  (`inhouse-search`) becomes the first registered upstream MCP channel.
-  现有 InHouseSearch 集成（inhouse-search）迁为第一个 MCP 渠道。
+* **Already half-built / 已有雏形**: the existing in-house MCP integration
+  becomes the first registered upstream MCP channel.
+  现有的内部 MCP 集成迁为第一个 MCP 渠道。
 
 ## A2A routing design / A2A 路由设计
 
@@ -75,7 +75,8 @@ accounting are data-plane features and apply unchanged.
 
 1. 0.5.0 — E2E envelope (station + plugin) per E2E-ENCRYPTION.md.
 2. 0.5.x — MCP gateway: JSON-RPC endpoint, channel registration, tool
-   catalogue + accounting; migrate `inhouse-search` as the first channel.
+   catalogue + accounting; migrate the existing in-house MCP server as the
+   first channel.
 3. 0.6.x — A2A: agent card, task routing over the cascade machinery.
 
 实施顺序：先 E2E 信封（它是三协议共用的保护层），再 MCP 网关（雏形已备），

@@ -108,6 +108,54 @@ def test_token_lifecycle_via_console(tmp_path: Path) -> None:
 
 
 
+def test_token_channel_group_is_creatable_and_editable(tmp_path: Path) -> None:
+    """渠道组（channel_group）必须在控制台可创建、可热改、可回显。
+
+    语义：把该令牌的可见上游范围钉到某个组（free/paid/stable…），空串 = 不限。
+    改完写盘，网关令牌热加载下一请求即生效——不需要重发令牌。
+    """
+    server, thread = _console_for(tmp_path)
+    ctx = _with(server, thread)
+    try:
+        status, payload = _req(
+            ctx.base, "POST", "/api/tokens",
+            {"name": "phone-a", "group": "vip", "channel_group": "paid"},
+        )
+        assert status == 200
+        listed = payload["tokens"][0]
+        assert listed["group"] == "vip"
+        assert listed["channel_group"] == "paid"
+
+        # 落盘可见（serve 热加载读的就是这份）
+        stored = TokenPool.load(tmp_path / "tokens.json").find_by_name("phone-a")
+        assert stored is not None and stored.channel_group == "paid"
+
+        # 热改渠道组 + 分组 + 模型白名单
+        status, payload = _req(
+            ctx.base, "PUT", f"/api/tokens/{listed['token_id']}",
+            {"channel_group": "free", "group": "basic", "models_text": "glm-5.2 , qwen3-32b"},
+        )
+        assert status == 200
+        listed = payload["tokens"][0]
+        assert listed["channel_group"] == "free"
+        assert listed["group"] == "basic"
+        assert listed["models"] == ["glm-5.2", "qwen3-32b"]
+
+        # 清空 = 恢复「不限」
+        status, payload = _req(
+            ctx.base, "PUT", f"/api/tokens/{listed['token_id']}", {"channel_group": ""},
+        )
+        assert payload["tokens"][0]["channel_group"] == ""
+
+        # 审计记下 channel_group 改动
+        events = audit.tail(tmp_path / "audit.jsonl")
+        updates = [e for e in events if e["event"] == "token.update"]
+        assert updates and "channel_group=" in updates[-1]["changes"]
+    finally:
+        ctx.close()
+
+
+
 def test_requests_and_usage_endpoints(tmp_path: Path) -> None:
     path = tmp_path / "requests.jsonl"
     reqlog.record(path, token="app-a", model="glm-5.2", channel="local-ollama", ok=True, tokens_in=7, tokens_out=3, latency_ms=20)

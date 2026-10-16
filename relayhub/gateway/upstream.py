@@ -24,6 +24,7 @@ from http.client import HTTPConnection, HTTPSConnection
 from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
+from . import connpool
 from .pool import (
     AUTH_MODE_BEARER,
     PROTOCOL_ANTHROPIC,
@@ -93,10 +94,9 @@ def _open(key: UpstreamKey, path: str, timeout: float) -> tuple[HTTPConnection, 
         raise UpstreamError(0, f"不支持的 scheme：{key.base_url}", retryable=False)
     host = parts.hostname or "127.0.0.1"
     port = parts.port or (443 if scheme == "https" else 80)
-    if scheme == "https":
-        connection: HTTPConnection = HTTPSConnection(host, port, timeout=timeout)
-    else:
-        connection = HTTPConnection(host, port, timeout=timeout)
+    # 连接池复用：同线程同 (scheme/host/port) 复用 TCP+TLS，省掉每次握手的固定开销。
+    # 见 connpool.py；连接非线程安全，故池按线程隔离。
+    connection = connpool.acquire(scheme, host, port, timeout)
     # 请求目标用 origin-form（仅路径）：http.client 对绝对 URL 会原样发出
     # 「POST http://host/... HTTP/1.1」，严格的 origin server 会回 404 空响应体。
     base_path = parts.path.rstrip("/")
@@ -620,9 +620,13 @@ def call_once(
             raise UpstreamError(response.status, _read_error(response), _retryable(response.status))
         raw = response.read()
     except (OSError, ssl.SSLError) as exc:
+        connpool.mark_dead(connection)
         raise UpstreamError(0, f"连接上游失败：{exc}", retryable=True) from exc
-    finally:
-        connection.close()
+    except UpstreamError:
+        # 非 200：响应体已读，连接本身没坏，归还池
+        connpool.release(connection, reusable=True)
+        raise
+    connpool.release(connection, reusable=True)
 
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -679,9 +683,12 @@ def call_embeddings(
             )
         raw = response.read()
     except (OSError, ssl.SSLError) as exc:
+        connpool.mark_dead(connection)
         raise UpstreamError(0, f"连接上游失败：{exc}", retryable=True) from exc
-    finally:
-        connection.close()
+    except UpstreamError:
+        connpool.release(connection, reusable=True)
+        raise
+    connpool.release(connection, reusable=True)
 
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -779,9 +786,10 @@ def _stream_anthropic(
                 parsed = {"type": current_event or "message", "raw": text}
             yield (current_event or str(parsed.get("type", "message")), parsed)
     except (OSError, ssl.SSLError) as exc:
+        connpool.mark_dead(connection)
         raise UpstreamError(0, f"连接上游失败：{exc}", retryable=True) from exc
-    finally:
-        connection.close()
+    # 流读完后连接归还池（响应体已消费尽，可安全复用）。
+    connpool.release(connection, reusable=True)
     if on_usage:
         on_usage(tokens_in, tokens_out)
 
@@ -950,9 +958,10 @@ def _stream_openai_as_anthropic(
         )
         yield ("message_stop", {"type": "message_stop"})
     except (OSError, ssl.SSLError) as exc:
+        connpool.mark_dead(connection)
         raise UpstreamError(0, f"连接上游失败：{exc}", retryable=True) from exc
-    finally:
-        connection.close()
+    # 流读完后连接归还池（响应体已消费尽，可安全复用）。
+    connpool.release(connection, reusable=True)
     if on_usage:
         on_usage(tokens_in, tokens_out)
 

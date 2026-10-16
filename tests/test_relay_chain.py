@@ -3,7 +3,7 @@
 
 防环路防的是「照镜子」（请求绕回同一个实例）。判环依据是每次启动随机生成
 的唯一实例标记（relayhub-<hex8>），部署之间不会撞——所以 A 站 → B 站的合法
-链路必须畅通；真环（B 的上游指回 A）才 508。这里用两个真实 RelayServer
+链路必须畅通；真环（B 的上游指回 A）才被判环拒掉。这里用两个真实 RelayServer
 串起来验证前半句，再用手工 Via 验证后半句。
 
 Hops 上限（RELAYHUB_MAX_HOPS，默认 4）只防失控长链，是纵深防御的第二层，
@@ -23,7 +23,7 @@ import pytest
 from relayhub.gateway import conformance
 from relayhub.gateway.pool import KeyPool
 from relayhub.gateway.router import KeyPoolRouter
-from relayhub.gateway.service import RelayServer
+from relayhub.gateway.service import RELAY_LOOP_STATUS, RelayServer
 from tests.support import REPLY_TEXT, FakeUpstream, make_key
 
 API_KEY = "rh_chain_down"
@@ -62,7 +62,7 @@ def _post_messages(base: str, api_key: str, headers: dict[str, str] | None = Non
 
 
 def test_two_relayhubs_chain_without_false_loop(tmp_path: Path) -> None:
-    """A 站的上游是 B 站（两家都用 relay-hub）：合法链路，绝不能 508。"""
+    """A 站的上游是 B 站（两家都用 relay-hub）：合法链路，绝不能被判环拒掉。"""
     with FakeUpstream() as upstream:
         # B 站：真实上游。A 站转发过来的凭证 = B 站的 api_key。
         router_b = KeyPoolRouter(KeyPool([make_key("real", upstream.base_url)]))
@@ -76,7 +76,7 @@ def test_two_relayhubs_chain_without_false_loop(tmp_path: Path) -> None:
 
 
 def test_request_returning_to_same_instance_is_rejected(tmp_path: Path) -> None:
-    """真环：Via 里已经带上了本站实例标记 → 508（照镜子必须拦）。"""
+    """真环：Via 里已经带上了本站实例标记 → 立即拒掉（照镜子必须拦）。"""
     with FakeUpstream() as upstream:
         router = KeyPoolRouter(KeyPool([make_key("real", upstream.base_url)]))
         with relay_server(router, api_key=API_KEY) as server:
@@ -84,7 +84,7 @@ def test_request_returning_to_same_instance_is_rejected(tmp_path: Path) -> None:
             status, raw = _post_messages(
                 server.base_url, API_KEY, headers={"Via": f"relayhub-other, {instance}"}
             )
-            assert status == 508, raw
+            assert status == RELAY_LOOP_STATUS, raw
             assert "环路" in raw
 
 
@@ -96,9 +96,9 @@ def test_hops_limit_is_configurable(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         router = KeyPoolRouter(KeyPool([make_key("real", upstream.base_url)]))
         with relay_server(router, api_key=API_KEY) as server:
             monkeypatch.setattr(service_module, "MAX_HOPS", 1)
-            # hops=1 已到上限（进入时 hops >= MAX_HOPS）→ 508
+            # hops=1 已到上限（进入时 hops >= MAX_HOPS）→ 判环拒掉
             status, _ = _post_messages(server.base_url, API_KEY, headers={"X-Relay-Hub-Hops": "1"})
-            assert status == 508
+            assert status == RELAY_LOOP_STATUS
             # 放宽到 3 之后同样的 hops=1 放行
             monkeypatch.setattr(service_module, "MAX_HOPS", 3)
             status, raw = _post_messages(server.base_url, API_KEY, headers={"X-Relay-Hub-Hops": "1"})

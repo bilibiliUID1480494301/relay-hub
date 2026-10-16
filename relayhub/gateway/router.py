@@ -388,20 +388,30 @@ _RUNTIME_ONLY_FIELDS = (
 )
 
 
-def config_fingerprint(path: Path) -> str | None:
+_UNREADABLE = object()  # 指纹哨兵：「读不到」≠「没变化」，也 ≠「变了」
+
+
+def config_fingerprint(path: Path) -> object:
     """号池文件的「配置指纹」——只算影响选路的字段。
 
     **刻意排除 usage / 熔断状态**。因为中转站每服务一个请求就会把用量落盘；
     若把运行时字段算进指纹，就退化成「每个请求 reload 一次」，round-robin 游标
     被反复重置，轮询直接变成「永远挑第一个 Key」。这个坑很隐蔽：
     测试里单请求都能过，只有连续请求才暴露。
+
+    返回值三种语义，**务必区分**：
+      * `str`        —— 读到了，这是内容指纹；
+      * `_UNREADABLE`—— 文件正在被写/暂时读不到（撕裂读、权限、不存在）。
+                        **不是「配置变了」**，调用方应保持现有 router 不动。
+                        （早期版本这里返回 None，与「指纹变了」不可区分，导致
+                        并发下每次空读都触发一次 reload → 500。）
     """
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
-        return None
+        return _UNREADABLE
     if not isinstance(raw, dict):
-        return None
+        return _UNREADABLE
     stripped: dict[str, Any] = {k: v for k, v in raw.items() if k != "keys"}
     stripped["keys"] = [
         {k: v for k, v in item.items() if k not in _RUNTIME_ONLY_FIELDS}
@@ -417,6 +427,10 @@ class ReloadingRouter:
 
     为什么不干脆重启中转站：重启会掐掉正在答题的客户端手上的在途请求。
     老师机上加一个上游 Key 不该有这个副作用。
+
+    **并发安全**：本类每请求都会探测指纹。文件正被另一个进程重写的瞬间，
+    读到的可能是空/半截内容——此时必须「按兵不动」沿用现有路由表，
+    绝不能 reload（那正是 0.9.0 并发 500 的根因）。
     """
 
     def __init__(self, pool_path: Path, **kwargs: Any) -> None:
@@ -442,18 +456,32 @@ class ReloadingRouter:
 
     def _current(self) -> KeyPoolRouter:
         fingerprint = config_fingerprint(self.pool_path)
-        if fingerprint != self._fingerprint:
-            with self._lock:
-                fingerprint = config_fingerprint(self.pool_path)
-                if fingerprint != self._fingerprint:
-                    self._router = self._build()
-                    self._fingerprint = fingerprint
+        # 读不到（正在被写）→ 保持现状。这是「空读」与「真变更」的分界点：
+        # 前者绝不能触发 reload，否则并发下每次撕裂读都会重建路由表并裸读文件。
+        if fingerprint is _UNREADABLE or fingerprint == self._fingerprint:
+            return self._router
+        with self._lock:
+            fingerprint = config_fingerprint(self.pool_path)
+            if fingerprint is _UNREADABLE or fingerprint == self._fingerprint:
+                return self._router
+            try:
+                new_router = self._build()
+            except Exception:  # noqa: BLE001 - 配置暂时读不全：沿用旧表，别把请求打成 500
+                return self._router
+            self._router = new_router
+            self._fingerprint = fingerprint
         return self._router
 
     # -- 与 KeyPoolRouter 同形 -------------------------------------------
+    #
+    # ⚠️ 签名必须与 KeyPoolRouter **逐参对齐**（含 group）。差一个参数，
+    # service.py 的 `except TypeError` 降级链就会在生产上悄悄触发——
+    # 不止丢掉 group（渠道组隔离失效），还会连带丢掉 trace_headers
+    # （链路追踪）与 fp（语义指纹/缓存键），而请求看起来完全正常。
+    # 这里曾经漏了 group，正好中了这一枪。
 
-    def models(self) -> dict[str, int]:
-        return self._current().models()
+    def models(self, group: str | None = None) -> dict[str, int]:
+        return self._current().models(group=group)
 
     def relay(
         self,
@@ -462,8 +490,11 @@ class ReloadingRouter:
         stream: bool,
         trace_headers: dict[str, str] | None = None,
         fp: str | None = None,
+        group: str | None = None,
     ) -> RelayOutcome:
-        return self._current().relay(model, payload, stream, trace_headers=trace_headers, fp=fp)
+        return self._current().relay(
+            model, payload, stream, trace_headers=trace_headers, fp=fp, group=group
+        )
 
     def relay_embeddings(
         self,

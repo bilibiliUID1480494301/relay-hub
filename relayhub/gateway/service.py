@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -744,6 +745,18 @@ try:
 except ValueError:
     MAX_HOPS = 4
 
+# 判环时回给客户端的状态码。
+#
+# 曾经是 508（Loop Detected）。换成 429 的理由：508 出自 RFC 5842（WebDAV
+# 扩展），OpenAI / Anthropic 的 SDK 错误表里没有它，客户端只会当成"未知错误"
+# 抛出来；而环路的正确客户端动作就是**别再发了、退避**，这正是 429 的语义，
+# 各家 SDK 都有成熟的退避重试处理。拒请求的时机与日志原因不变（仍是立即拒、
+# 日志里仍写 relay loop），可诊断性不丢。
+#
+# 若将来需要把"环"和"真限流"在客户端侧区分开，改这里一个常量即可；
+# 想回到 508 也只改这一行。
+RELAY_LOOP_STATUS = 429
+
 
 def _panel_bg_css() -> str:
     """从 webui.json 读外观配置，生成 body 背景 CSS。
@@ -876,7 +889,19 @@ refresh();
 
 class RelayHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "relayhub/0.2"
+    # Server 响应头里的版本号。早先写死 "relayhub/0.2"——排查时永远不知道
+    # 对面跑的是哪一版，只好去问部署的人。改成跟随包版本单一来源
+    # （与 /health、agent card 同一份），别在这里再抄一个数字。
+    server_version = f"relayhub/{relayhub_version}"
+
+    def version_string(self) -> str:
+        """Server 头只报自己的名字和版本，**不带 Python 版本**。
+
+        `BaseHTTPRequestHandler.version_string()` 默认拼上 `sys_version`
+        （形如 "Python/3.11.9"），等于把解释器版本号广播给每一个客户端——
+        扫端口的人拿它直接查该版本有哪些 CVE 可用。这是免费信息，别送。
+        """
+        return self.server_version
 
     @property
     def router(self) -> Any:
@@ -973,12 +998,26 @@ class RelayHandler(BaseHTTPRequestHandler):
                    cookie_max_age: int = 0) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        self._echo_request_id()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         if cookie:
             self._set_cookie_header(cookie, cookie_max_age)
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def _echo_request_id(self) -> None:
+        """把本请求的 id 回给客户端（响应头 X-Request-ID）。
+
+        为什么非做不可：请求 id 此前只往上游和日志流。客户端拿到一个 500 时
+        没有任何凭据可引用——客服问「哪个请求」，用户只能答「刚才那次」。
+        有了这个头，客户端可以直接把 id 贴给我们，日志里能一刀定位到那一行。
+
+        客户端自己带了 X-Request-ID 就沿用它的（链路两端对齐），没带才用我们生成的。
+        """
+        request_id = getattr(self, "_current_request_id", "")
+        if request_id:
+            self.send_header("X-Request-ID", request_id)
 
     def _issue_user_api_key(self, user: Any) -> str:
         """给用户发/换 API Key：绑定 user_id 的 normal 令牌，旧的全删。"""
@@ -1685,6 +1724,7 @@ class RelayHandler(BaseHTTPRequestHandler):
     def _begin_sse(self) -> None:
         """用 chunked 编码，HTTP/1.1 下不依赖连接关闭来界定正文。"""
         self.send_response(200)
+        self._echo_request_id()  # 流式同样要能拿 id 回溯（见 _echo_request_id）
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Transfer-Encoding", "chunked")
@@ -1710,7 +1750,19 @@ class RelayHandler(BaseHTTPRequestHandler):
 
     # -- 路由 ------------------------------------------------------------
 
+    def _begin_request(self) -> str:
+        """请求入口：定下本请求的 id（客户端带了就沿用它的）。
+
+        必须在任何错误返回**之前**调用，否则早期错误（404 未知路径、
+        403 拉黑、429 限流）响应里没有 X-Request-ID 可回——而那恰恰是
+        最需要客户端拿 id 来申诉的几类。
+        """
+        request_id = (self.headers.get("X-Request-ID") or uuid.uuid4().hex)[:64]
+        self._current_request_id = request_id
+        return request_id
+
     def do_GET(self) -> None:  # noqa: N802
+        self._begin_request()
         # 注意别对根路径做 rstrip("/")："/" 会被剥成空串，导致根路径判断失效
         path = self.path.split("?")[0]
         if path != "/":
@@ -1885,6 +1937,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"object": "list", "data": data})
 
     def do_POST(self) -> None:  # noqa: N802
+        self._begin_request()
         try:
             self._post()
         except Exception as exc:  # noqa: BLE001
@@ -1972,15 +2025,14 @@ class RelayHandler(BaseHTTPRequestHandler):
             inbound_hops = int(self.headers.get("X-Relay-Hub-Hops") or 0)
         except ValueError:
             inbound_hops = 0
-        request_id = (self.headers.get("X-Request-ID") or uuid.uuid4().hex)[:64]
-        self._current_request_id = request_id
+        request_id = self._current_request_id  # 入口已定好（见 _begin_request）
         # Hops 上限可配置（RELAYHUB_MAX_HOPS，默认 4）：覆盖「多家中转站级联」的
         # 合法长链。判环本身不靠 Hops 单打——Via 里的实例标记是每次启动随机生成
         # 的唯一 id（relayhub-<hex8>），部署之间不会撞；所以 A 站 → B 站（两家都用
         # relay-hub）是正常链路，B 只认自己的标记；只有链路真的绕回同一实例才判环。
         if inbound_hops >= MAX_HOPS or instance in inbound_via:
             self._error(
-                508,
+                RELAY_LOOP_STATUS,
                 "检测到转发环路：Via/Hops 链路标识显示本请求已经过本站。"
                 "请检查上游配置是否把本站指回了自己。",
                 "api_error",
@@ -1988,7 +2040,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             )
             self._log_request(
                 started=started, dialect=dialect, identity=None,
-                ok=False, status=508, reason="relay loop via headers",
+                ok=False, status=RELAY_LOOP_STATUS, reason="relay loop via headers",
             )
             return
         trace_headers = {
@@ -2144,14 +2196,14 @@ class RelayHandler(BaseHTTPRequestHandler):
             fp = _request_fingerprint(model, body)
             if not self.loop_guard.acquire(fp):
                 self._error(
-                    508,
+                    RELAY_LOOP_STATUS,
                     "检测到转发环路：同一请求内容在飞次数超限。请检查上游是否指回了本站。",
                     "api_error",
                     dialect,
                 )
                 self._log_request(
                     started=started, dialect=dialect, model=model, identity=identity,
-                    ok=False, status=508, reason="relay loop detected",
+                    ok=False, status=RELAY_LOOP_STATUS, reason="relay loop detected",
                 )
                 return
         try:
@@ -2803,6 +2855,15 @@ class ResponseCache:
 class RelayServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    # accept 队列深度。默认 5 在并发 100 下会直接丢连接（实测 9/300 失败、
+    # QPS 被压到 18）；512 后同一压测 QPS 491（约 27 倍）。
+    request_queue_size = 512
+
+    def server_bind(self) -> None:
+        """关掉 Nagle。SSE 每次只推几 KB 的小包，Nagle 攒包 + 延迟 ACK
+        会叠出约 40ms 的首字延迟——流式体感全毁在这个默认值上。"""
+        self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        super().server_bind()
 
     def handle_error(self, request: Any, client_address: tuple[str, int]) -> None:
         """客户端半途掐连接（探活/负载器常见）只值得一行日志，不值得整段堆栈刷屏。"""
@@ -2828,7 +2889,7 @@ class RelayServer(ThreadingHTTPServer):
         redeem: RedeemStore | None = None,
         loop_limit: int = 3,
         ip_rpm: int = 60,
-        max_concurrency: int = 4,
+        max_concurrency: int = 16,
         queue_size: int = 16,
         queue_wait: float = 30.0,
         policy: Any = None,

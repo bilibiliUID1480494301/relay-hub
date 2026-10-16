@@ -212,7 +212,7 @@ def _cmd_serve(argv: list[str]) -> int:
     parser.add_argument(
         "--max-concurrency",
         type=int,
-        default=4,
+        default=16,
         dest="max_concurrency",
         help="同时在处理的推理请求数上限（0=不限制）。超出进排队",
     )
@@ -229,6 +229,17 @@ def _cmd_serve(argv: list[str]) -> int:
         default=30.0,
         dest="queue_wait",
         help="排队最久等待秒数，超时回 429（0=满员即拒，不排队）",
+    )
+    parser.add_argument(
+        "--loop-limit",
+        type=int,
+        default=3,
+        dest="loop_limit",
+        help=(
+            "转发环路检测阈值：同一内容指纹的在飞请求数上限（最小 2）。"
+            "超过即判环并拒请求。多级中转链路长、或并发重试多时调大；"
+            "调小更快发现环，但误伤同内容并发请求的概率上升"
+        ),
     )
     parser.add_argument(
         "--pair-mode",
@@ -334,6 +345,7 @@ def _cmd_serve(argv: list[str]) -> int:
         max_concurrency=args.max_concurrency,
         queue_size=args.queue_size,
         queue_wait=args.queue_wait,
+        loop_limit=args.loop_limit,
         policy=policy_module.PolicyStore(paths.policy_path()),
         pair_mode=args.pair_mode,
     )

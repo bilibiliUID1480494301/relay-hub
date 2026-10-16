@@ -1179,3 +1179,118 @@ def test_retries_config_roundtrip(tmp_path: Path) -> None:
     assert KeyPool.load(path).retries == 3
     with pytest.raises(PoolError):
         KeyPool([_key("a", "http://a")], retries=0)
+
+
+# ================================================================ D1 并发撕裂读回归
+#
+# 0.9.0 的并发 500 根因：`config_fingerprint()` 读到半截 JSON 时返回 None，
+# 而调用方用 `None != self._fingerprint` 判定「配置变了」→ reload → `KeyPool.load()`
+# 裸读同一份半截文件 → JSONDecodeError → 500。
+#
+# 修法是「哨兵」：`_UNREADABLE` 把「读不到」与「变了」分开；空读时保持现状。
+# 下面两条测试把这个语义钉死——谁把它改回三值不分，谁就在恢复线上 500。
+
+
+def test_fingerprint_unreadable_is_not_change(tmp_path: Path) -> None:
+    """文件读不到（不存在/半截 JSON）时返回哨兵，且哨兵 ≢ 「变了」。"""
+    from relayhub.gateway.router import _UNREADABLE
+
+    missing = tmp_path / "nope.json"
+    assert config_fingerprint(missing) is _UNREADABLE
+
+    torn = tmp_path / "torn.json"
+    torn.write_text('{"keys": [{"label": "a", "base_url": "ht', encoding="utf-8")
+    assert config_fingerprint(torn) is _UNREADABLE
+
+    # 非 dict 顶层同样算读不到，不能当成「指纹 = 某值」
+    arr = tmp_path / "arr.json"
+    arr.write_text("[1, 2, 3]", encoding="utf-8")
+    assert config_fingerprint(arr) is _UNREADABLE
+
+    # 关键：哨兵与「真指纹」必须不等——若相等，空读会被误判成变更。
+    path = tmp_path / "pool.json"
+    _write_pool(path, _key("a", "http://a"))
+    assert config_fingerprint(path) is not _UNREADABLE
+
+
+def test_reloading_router_survives_torn_reads(tmp_path: Path) -> None:
+    """并发非原子重写号池时，探测 + reload 路径零异常。
+
+    复刻线上场景：另一个进程用「截断再写」的方式持续改 pool.json，
+    多个线程同时调 router.models()（每请求真实路径）。修复前这里会抛
+    JSONDecodeError（实测 27.8% 失败率）；修复后必须 0 异常。
+    """
+    path = tmp_path / "pool.json"
+    _write_pool(path, _key("a", "http://a"), _key("b", "http://b"))
+    router = ReloadingRouter(path)
+
+    stop = threading.Event()
+    errors: list[BaseException] = []
+    # 非原子写入：先 truncate 到 0，再分几次写——中间态必然是半截 JSON。
+    blob = json.dumps(
+        {
+            "keys": [
+                {
+                    "key_id": str(uuid.uuid4()),
+                    "label": f"k{i}",
+                    "base_url": f"http://u{i}",
+                    "api_key": "up",
+                    "protocol": PROTOCOL_ANTHROPIC,
+                    "models": ["glm-5.2"],
+                    "model_windows": {"glm-5.2": 1000000},
+                }
+                for i in range(6)
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+    def writer() -> None:
+        while not stop.is_set():
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(blob[: len(blob) // 3])
+                fh.flush()
+                fh.write(blob[len(blob) // 3 :])
+                fh.flush()
+
+    def reader() -> None:
+        for _ in range(400):
+            if stop.is_set():
+                return
+            try:
+                router.models()
+            except BaseException as exc:  # noqa: BLE001 - 任何异常都算回归
+                errors.append(exc)
+                return
+
+    wt = threading.Thread(target=writer, daemon=True)
+    wt.start()
+    threads = [threading.Thread(target=reader) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    stop.set()
+    wt.join(timeout=5)
+
+    assert not errors, f"并发撕裂读仍会炸：{errors[:3]!r}"
+
+
+def test_reloading_router_keeps_serving_when_pool_unreadable(tmp_path: Path) -> None:
+    """号池被写坏/读不到时，已在跑的 router 仍用旧表，不抛异常。"""
+    path = tmp_path / "pool.json"
+    _write_pool(path, _key("a", "http://a"))
+    router = ReloadingRouter(path)
+    assert sorted(router.models()) == ["glm-5.2"]
+
+    # 半截 JSON（模拟另一个进程正在写）：不得触发 reload，沿用旧表
+    path.write_text('{"keys": [{"label": "a", "base_url": "ht', encoding="utf-8")
+    assert sorted(router.models()) == ["glm-5.2"]
+
+    # 顶层非 dict：同样算读不到
+    path.write_text("[]", encoding="utf-8")
+    assert sorted(router.models()) == ["glm-5.2"]
+
+    # 完全空文件：最常见的撕裂读中间态
+    path.write_text("", encoding="utf-8")
+    assert sorted(router.models()) == ["glm-5.2"]

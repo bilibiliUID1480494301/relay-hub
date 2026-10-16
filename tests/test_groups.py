@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 
 from relayhub.gateway.pool import KeyPool
-from relayhub.gateway.router import KeyPoolRouter, RouterError
+from relayhub.gateway.router import KeyPoolRouter, ReloadingRouter, RouterError
 from relayhub.gateway.tokens import DownstreamToken
 
 from support import make_key
@@ -88,3 +88,42 @@ def test_router_relay_passes_group_to_pool() -> None:
     except RouterError:
         pass  # 上游连不上没关系；我们只验证分组参数被透传
     assert seen == ["free"]
+
+
+def test_reloading_router_forwards_group(tmp_path) -> None:
+    """D4 回归：ReloadingRouter 必须把 group 透传给内层 KeyPoolRouter。
+
+    这条曾经是坏的：包装类签名漏了 group，service.py 的 `except TypeError`
+    降级链于是在生产上静默触发——**不只**丢掉 group（渠道组隔离失效），
+    还连带丢掉 trace_headers（链路追踪）和 fp（语义指纹/缓存键），
+    而请求看起来完全正常。所以这里连 trace_headers/fp 一起钉死。
+    """
+    path = tmp_path / "pool.json"
+    pool = KeyPool([make_key("free-1", "http://free", group="free")])
+    pool.save(path)
+    router = ReloadingRouter(path)
+
+    assert set(router.models()) == {"glm-5.2"}
+    assert set(router.models(group="free")) == {"glm-5.2"}
+    assert router.models(group="paid") == {}
+
+    # relay 的参数必须原样到达内层（spy 拦 pool.candidates 拿得到 group）
+    inner = router._current()
+    seen: list = []
+    orig = inner.pool.candidates
+
+    def spy(model: str, strategy=None, group=None):
+        seen.append(group)
+        return orig(model, strategy, group)
+
+    inner.pool.candidates = spy  # type: ignore[method-assign]
+    try:
+        router.relay(
+            "glm-5.2", {}, False,
+            trace_headers={"Via": "relayhub-x", "X-Relay-Hub-Hops": "1"},
+            fp="fp-1",
+            group="free",
+        )
+    except RouterError:
+        pass  # 上游连不上无所谓，只看参数是否透传
+    assert seen == ["free"], f"group 未透传到内层：{seen!r}"

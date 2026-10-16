@@ -11,11 +11,14 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
 PY = sys.executable
-TMP = Path(r"C:/Users/example/AppData/Local/Temp/hubrelay_mtv")
+# 工作目录用系统临时区而不是某台机器的绝对路径：写死本机路径会把
+# 开发者的用户名与目录结构带进公开仓库（正是本仓 scan_leak 要拦的那类）。
+TMP = Path(os.environ.get("RELAYHUB_MULTIVER_TMP") or tempfile.mkdtemp(prefix="relayhub_mtv_"))
 
 CHILD = (
     "import sys, time, hubrelay\n"

@@ -37,14 +37,21 @@ _last_prune = 0.0
 
 def set_retention(days: int) -> None:
     """设置保留天数 / set log retention in days (0 = keep forever)."""
-    global _RETENTION_DAYS
+    global _RETENTION_DAYS, _last_prune
     _RETENTION_DAYS = max(0, int(days))
+    # 改保留期是管理员的明确动作，应当**下一次写入就生效**，而不是等最长
+    # 一小时的节流窗口过去。重置节流戳顺带消除了一个测试顺序依赖：
+    # 前一个用例刚 prune 过，本用例的 record 就会被节流挡掉、断言失败。
+    _last_prune = 0.0
 
 
 def _prune_old(path: Path, now: float) -> None:
     """删除超过保留天数的按日明细文件（每小时至多跑一次）。"""
     global _last_prune
-    if _RETENTION_DAYS <= 0 or now - _last_prune < 3600:
+    # 节流：0 <= 间隔 < 3600 才跳过。写成 `0 <=` 而不是裸比较，是为了让
+    # 墙钟回拨（NTP 校正/手动改时间）导致的负间隔仍然触发清理，
+    # 而不是一路 `now - _last_prune < 3600` 把自己锁死到时钟追上为止。
+    if _RETENTION_DAYS <= 0 or 0 <= now - _last_prune < 3600:
         return
     _last_prune = now
     cutoff = time.strftime("%Y%m%d", time.localtime(now - _RETENTION_DAYS * 86400))

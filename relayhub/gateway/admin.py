@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .. import __version__ as relayhub_version
 from .. import paths
 from . import atomicio
 from . import audit as audit_module
@@ -251,7 +252,12 @@ def _apply_user_settings(
 
 class AdminHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "relayhub-admin/0.1"
+    # 跟随包版本（与 /health、agent card 同一份），别再写死一个数字。
+    server_version = f"relayhub-admin/{relayhub_version}"
+
+    def version_string(self) -> str:
+        """Server 头只报自己的名字和版本，不带 Python 版本（信息泄露）。"""
+        return self.server_version
 
     # -- 基础设施 --------------------------------------------------------
 
@@ -990,6 +996,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                         expires_at=(time.time() + days * 86400) if days > 0 else 0.0,
                         note=str(body.get("note") or ""),
                         group=str(body.get("group") or "default"),
+                        channel_group=str(body.get("channel_group") or ""),
                     )
                 )
             except TokenError as exc:
@@ -1049,11 +1056,30 @@ class AdminHandler(BaseHTTPRequestHandler):
                     return
                 record.scope = str(body["scope"])
                 changed.append(f"scope={record.scope}")
+            if "channel_group" in body:
+                # 渠道组：把该令牌的可见范围钉到某个上游组（空串 = 不限）。
+                # 写盘后网关令牌热加载立刻生效——不用重发令牌，改完下一请求即受约束。
+                record.channel_group = str(body["channel_group"] or "").strip()
+                changed.append(f"channel_group={record.channel_group or '(不限)'}")
+            if "group" in body:
+                # 用户分组：决定下游倍率与模型可见性，同样热改。
+                record.group = str(body["group"] or "").strip() or "default"
+                changed.append(f"group={record.group}")
+            if "models_text" in body:
+                # 模型白名单：空 = 不限；逗号分隔（与创建接口同形）。
+                record.models = tuple(
+                    m.strip() for m in str(body["models_text"] or "").split(",") if m.strip()
+                )
+                changed.append(f"models={','.join(record.models) or '(不限)'}")
             if changed:
                 pool.save(tokens_path)
                 # 只动 enabled 时沿用历史事件名 token.toggle（既有审计/测试的契约）；
-                # 带限额/作用域的改动才是 token.update。
-                is_toggle_only = changed == [f"enabled={bool(body['enabled'])}"]
+                # 带其它字段（限额/作用域/渠道组…）的改动才是 token.update。
+                # 注意判据必须是「恰好只改了 enabled」——早先这里直接取 body["enabled"]，
+                # 遇到不含 enabled 的更新（如只改 channel_group）会 KeyError 打成 500。
+                is_toggle_only = "enabled" in body and changed == [
+                    f"enabled={bool(body['enabled'])}"
+                ]
                 audit_module.record(
                     "token.toggle" if is_toggle_only else "token.update",
                     path=self.server.audit_path,  # type: ignore[attr-defined]
@@ -1682,6 +1708,7 @@ display:none;border:1px solid var(--line);background:var(--panel)}
   <div class="row">
     <label>设备名 <input id="t-name" placeholder="教室平板-01"></label>
     <label>分组 <input id="t-group" placeholder="default（如 class-2 / vip）"></label>
+    <label>渠道组 <input id="t-channel-group" placeholder="留空 = 不限（free/paid/stable…）"></label>
     <label>模型限制 <input id="t-models" placeholder="逗号分隔；留空 = 不限制"></label>
     <label>作用域 <select id="t-scope">
       <option value="normal">normal（真实模型）</option>
@@ -1692,6 +1719,7 @@ display:none;border:1px solid var(--line);background:var(--panel)}
     <label>有效期(天) <input id="t-days" type="number" min="0" step="1" placeholder="0=永久"></label>
     <label>备注 <input id="t-note"></label>
     <button id="t-add">发放</button>
+    <button class="ghost" id="t-cancel" hidden>取消编辑</button>
   </div>
   <div id="t-new" style="display:none" class="panel" style="margin-top:12px">
     <b>新令牌明文（只显示这一次）：</b>
@@ -1704,7 +1732,7 @@ display:none;border:1px solid var(--line);background:var(--panel)}
 <section class="panel">
   <h2>下游令牌</h2>
   <div style="overflow-x:auto"><table>
-    <thead><tr><th>设备</th><th>分组</th><th>状态</th><th>作用域</th><th>模型限制</th><th>限额</th><th>用量</th><th>最近来源（客户端身份）</th><th>令牌</th><th>操作</th></tr></thead>
+    <thead><tr><th>设备</th><th>分组</th><th>渠道组</th><th>状态</th><th>作用域</th><th>模型限制</th><th>限额</th><th>用量</th><th>最近来源（客户端身份）</th><th>令牌</th><th>操作</th></tr></thead>
     <tbody id="t-rows"></tbody>
   </table></div>
   <p class="hint">分组筛选：
@@ -2297,6 +2325,9 @@ function loadTokens(){
         ?'<span class="tag t-warn">test·合成</span>'
         :'<span class="tag t-ok">normal</span>';
       var groupTag='<span class="tag t-api">'+esc(t.group||'default')+'</span>';
+      var channelTag=t.channel_group
+        ?'<span class="tag t-ok">'+esc(t.channel_group)+'</span>'
+        :'<span style="color:var(--muted)">不限</span>';
       var limits=[];
       if(t.rpm){limits.push(t.rpm+'/分');}
       if(t.daily_requests){limits.push(t.daily_requests+'/天');}
@@ -2311,6 +2342,7 @@ function loadTokens(){
       var seenText=seen.length?seen.join('<br>'):'<span style="color:var(--muted)">无客户端身份</span>';
       return '<tr><td><b>'+esc(t.name)+'</b>'+(t.note?'<div class="err">'+esc(t.note)+'</div>':'')+'</td>'+
         '<td>'+groupTag+'</td>'+
+        '<td>'+channelTag+'</td>'+
         '<td>'+state+'</td>'+
         '<td>'+scopeTag+'</td>'+
         '<td>'+(t.models.length?esc(t.models.join(', ')):'<span class="tag t-off">不限制</span>')+'</td>'+
@@ -2319,31 +2351,43 @@ function loadTokens(){
         '<td>'+seenText+'</td>'+
         '<td class="mono">'+esc(t.token_hint)+'</td>'+
         '<td><div class="ops">'+
+          '<button data-te="'+esc(t.token_id)+'">编辑</button>'+
           '<button data-tt="'+esc(t.token_id)+'">'+(t.enabled?'禁用':'启用')+'</button>'+
           '<button class="danger" data-td="'+esc(t.token_id)+'">吊销</button>'+
         '</div></td></tr>';
     }).join('');
     document.getElementById('t-rows').innerHTML=rows||
-      '<tr><td colspan="10" style="color:var(--muted)">还没有令牌，用上面的表单发放。</td></tr>';
+      '<tr><td colspan="11" style="color:var(--muted)">还没有令牌，用上面的表单发放。</td></tr>';
   }).catch(function(e){toast('加载失败：'+e.message,false);});
 }
 
 document.getElementById('t-add').onclick=function(){
   var name=document.getElementById('t-name').value.trim();
   if(!name){toast('设备名不能为空',false);return;}
-  api('POST','/api/tokens',{
-    name:name,
+  var payload={
     group:document.getElementById('t-group').value.trim(),
+    channel_group:document.getElementById('t-channel-group').value.trim(),
     models_text:document.getElementById('t-models').value,
     scope:document.getElementById('t-scope').value,
     rpm:parseInt(document.getElementById('t-rpm').value,10)||0,
     daily_requests:parseInt(document.getElementById('t-daily').value,10)||0,
     days:parseInt(document.getElementById('t-days').value,10)||0,
     note:document.getElementById('t-note').value.trim()
-  }).then(function(s){
+  };
+  if(window.__editing){
+    // 更新态：设备名不可改（改名会丢身份连续性），其余热改，下一请求即生效
+    api('PUT','/api/tokens/'+encodeURIComponent(window.__editing),payload).then(function(){
+      toast('已保存修改（下一请求即生效）',true);
+      resetTokenForm();loadTokens();
+    }).catch(function(e){toast('保存失败：'+e.message,false);});
+    return;
+  }
+  payload.name=name;
+  api('POST','/api/tokens',payload).then(function(s){
     document.getElementById('t-new').style.display='';
     document.getElementById('t-new-token').textContent=s.token;
     toast('令牌已发放（明文只显示这一次）',true);
+    resetTokenForm();
     loadTokens();
   }).catch(function(e){toast('发放失败：'+e.message,false);});
 };
@@ -2351,8 +2395,28 @@ document.getElementById('t-add').onclick=function(){
 document.getElementById('t-rows').onclick=function(ev){
   var b=ev.target.closest('button');if(!b){return;}
   var list=window.__tokens||[];
-  var rec=list.filter(function(t){return t.token_id===(b.dataset.tt||b.dataset.td);})[0];
+  var key=b.dataset.tt||b.dataset.td||b.dataset.te;
+  var rec=list.filter(function(t){return t.token_id===key;})[0];
   if(!rec){return;}
+  if(b.dataset.te){
+    // 编辑：把当前值灌进表单，切到「更新」态（渠道组/分组/模型/限额都能热改）
+    window.__editing=rec.token_id;
+    document.getElementById('t-name').value=rec.name;
+    document.getElementById('t-name').disabled=true;
+    document.getElementById('t-group').value=rec.group||'default';
+    document.getElementById('t-channel-group').value=rec.channel_group||'';
+    document.getElementById('t-models').value=(rec.models||[]).join(',');
+    document.getElementById('t-scope').value=rec.scope||'normal';
+    document.getElementById('t-rpm').value=rec.rpm||0;
+    document.getElementById('t-daily').value=rec.daily_requests||0;
+    document.getElementById('t-days').value=0;
+    document.getElementById('t-note').value=rec.note||'';
+    document.getElementById('t-add').textContent='保存修改';
+    document.getElementById('t-cancel').hidden=false;
+    document.getElementById('t-new').style.display='none';
+    document.getElementById('pane-tokens').scrollIntoView({behavior:'smooth'});
+    return;
+  }
   if(b.dataset.tt){
     api('PUT','/api/tokens/'+encodeURIComponent(rec.token_id),{enabled:!rec.enabled})
       .then(loadTokens).catch(function(e){toast(e.message,false);});
@@ -2364,6 +2428,18 @@ document.getElementById('t-rows').onclick=function(ev){
       .then(loadTokens).catch(function(e){toast(e.message,false);});
   }
 };
+
+function resetTokenForm(){
+  window.__editing=null;
+  ['t-name','t-group','t-channel-group','t-models','t-note'].forEach(function(id){
+    var el=document.getElementById(id);el.value='';el.disabled=false;});
+  document.getElementById('t-scope').value='normal';
+  ['t-rpm','t-daily','t-days'].forEach(function(id){document.getElementById(id).value='';});
+  document.getElementById('t-add').textContent='发放';
+  document.getElementById('t-cancel').hidden=true;
+}
+
+document.getElementById('t-cancel').onclick=resetTokenForm;
 
 // ---- 接入策略（拉黑 / 优先队列） ----
 

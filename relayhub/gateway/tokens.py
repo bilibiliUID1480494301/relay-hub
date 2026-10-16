@@ -201,13 +201,21 @@ def _normalize_group(raw: str) -> str:
     return text[:32] or "default"
 
 
-def _fingerprint(path: Path) -> str | None:
+_UNREADABLE = object()  # 指纹哨兵：「读不到」≠「没变化」，也 ≠「变了」（与 router 同源）
+
+
+def _fingerprint(path: Path) -> object:
+    """与 `router.config_fingerprint` 同源：读不到必须返回哨兵而非 None。
+
+    若返回 None，`None != self._fingerprint` 会被判成「令牌配置变了」→ 每请求
+    重载一次；文件正被写的瞬间更会 reload 到半截内容而抛 JSONDecodeError。
+    """
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
-        return None
+        return _UNREADABLE
     if not isinstance(raw, dict):
-        return None
+        return _UNREADABLE
     stripped = {
         k: v for k, v in raw.items() if k != "tokens"
     }
@@ -234,7 +242,11 @@ class TokenPool:
         path = Path(path)
         if not path.is_file():
             return cls([])
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            # 正在被重写的瞬间读到半截：返回空池，别让并发请求炸成 500。
+            return cls([])
         return cls([DownstreamToken.from_dict(item) for item in raw.get("tokens", [])])
 
     def save(self, path: Path) -> None:
@@ -345,6 +357,7 @@ class TokenPool:
                     "name": t.name,
                     "enabled": t.enabled,
                     "group": t.group,
+                    "channel_group": t.channel_group,
                     "token_hint": t.token_hint or token_hint_of(t.token),
                     "models": list(t.models),
                     "scope": t.scope,
@@ -382,12 +395,19 @@ class TokenStore:
 
     def _current(self) -> TokenPool:
         fingerprint = _fingerprint(self.path)
-        if fingerprint != self._fingerprint:
-            with self._lock:
-                fingerprint = _fingerprint(self.path)
-                if fingerprint != self._fingerprint:
-                    self._pool = TokenPool.load(self.path)
-                    self._fingerprint = fingerprint
+        # 读不到（正在被写）→ 保持现状，绝不当成「令牌配置变了」去 reload。
+        if fingerprint is _UNREADABLE or fingerprint == self._fingerprint:
+            return self._pool
+        with self._lock:
+            fingerprint = _fingerprint(self.path)
+            if fingerprint is _UNREADABLE or fingerprint == self._fingerprint:
+                return self._pool
+            try:
+                new_pool = TokenPool.load(self.path)
+            except Exception:  # noqa: BLE001 - 令牌文件暂时读不全：沿用旧池
+                return self._pool
+            self._pool = new_pool
+            self._fingerprint = fingerprint
         return self._pool
 
     # -- 与 TokenPool 同形（每次都走热加载检查） ---------------------------
@@ -417,7 +437,7 @@ class TokenStore:
         """
         with self._lock:
             fingerprint = _fingerprint(self.path)
-            if fingerprint != self._fingerprint:
+            if fingerprint is not _UNREADABLE and fingerprint != self._fingerprint:
                 self._pool = TokenPool.load(self.path)
                 self._fingerprint = fingerprint
             self._pool.add(token)
