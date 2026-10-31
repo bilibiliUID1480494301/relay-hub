@@ -245,3 +245,54 @@ def test_panel_pre_consume_rejects_oversized_prompt(panel_relay) -> None:
 
     status, body, _ = _call(base, "/api/user/me", cookie=cookie)
     assert body["quota"] == server.users.pool.default_quota  # 分文未扣
+
+
+# ---------------------------------------------------------------- 身份模型
+
+
+def test_capability_matrix_roles() -> None:
+    """三档角色 × 能力矩阵：vip 只多资源，不多权力。"""
+    from relayhub.gateway.users import CAPABILITIES, can, normalize_role
+
+    # VIP 不该拿到管理员能力
+    assert can("vip", "panel.view") is True
+    assert can("vip", "queue.priority") is True
+    assert can("vip", "admin.anything") is False
+    # 普通用户没有优先队列
+    assert can("user", "queue.priority") is False
+    # 管理员通配
+    assert can("admin", "whatever.else") is True
+    # 非法角色**绝不能**回落成 admin（安全问题，不是显示问题）
+    assert normalize_role("root") == "user"
+    assert normalize_role("ADMIN") == "admin"
+    assert normalize_role(None) == "user"
+    assert "*" in CAPABILITIES["admin"]
+
+
+def test_api_channel_loses_panel_capabilities() -> None:
+    """接入方式=api 的账号不能使用网页面板，但照样能调 API。"""
+    import uuid
+
+    from relayhub.gateway.users import User, can
+
+    api_user = User(user_id=str(uuid.uuid4()), username="bot", password_hash="x",
+                    role="user", channel="api")
+    assert can(api_user, "panel.view") is False
+    assert can(api_user, "panel.key") is False
+    assert can(api_user, "api.call") is True
+
+    # 禁用账号一律没能力
+    api_user.enabled = False
+    assert can(api_user, "api.call") is False
+
+
+def test_legacy_user_file_defaults_channel_and_role() -> None:
+    """老 users.json 没有 channel/role 字段时，必须回落成 web + user。"""
+    import uuid
+
+    from relayhub.gateway.users import User
+
+    raw = {"user_id": str(uuid.uuid4()), "username": "old", "password_hash": "x"}
+    user = User.from_dict(raw)
+    assert user.role == "user"
+    assert user.channel == "web"

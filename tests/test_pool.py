@@ -1017,7 +1017,7 @@ def test_pool_edit_recovers_service_without_restart(tmp_path: Path) -> None:
             first = probe.post("/v1/messages", request)[0]
             assert first.status == 502, first.body  # 号池里唯一的渠道是坏的
 
-            # 老师机上加一个能用的渠道——就是这个动作不该掐断正在答题的客户端
+            # 运维机上加一个能用的渠道——就是这个动作不该掐断正在处理的客户端
             pool = KeyPool.load(path)
             pool.add(_key("alive", healthy.base_url, protocol=PROTOCOL_OPENAI_CHAT))
             pool.save(path)

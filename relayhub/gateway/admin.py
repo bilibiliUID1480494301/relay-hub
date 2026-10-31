@@ -4,7 +4,7 @@
 两者同进程的话，网关的一个鉴权漏洞就直接等于号池沦陷。分开跑，网关被打穿也不牵连管理面。
 
 两边只共享一个 `pool.json`：管理面改完立刻写盘，网关侧 `ReloadingRouter` 的配置指纹
-一变就热加载，所以改 Key 不用重启网关、不会掐断正在答题的客户端。
+一变就热加载，所以改 Key 不用重启网关、不会掐断正在处理的请求。
 
 安全边界（都是刻意的）：
   * 默认只绑回环地址；要绑非回环地址**必须**显式给 `--token`，否则拒绝启动。
@@ -38,6 +38,9 @@ from . import audit as audit_module
 from . import pluginlogs as pluginlogs_module
 from . import reqlog as reqlog_module
 from . import toip as toip_module
+from . import newapi as newapi_module
+from . import features as features_module
+from . import site as site_module
 from . import upstream
 from .policy import KIND_DEVICE, KIND_IP, PolicyError, PolicyStore
 from .users import RedeemStore, UserError, UserPool, hash_password
@@ -79,7 +82,7 @@ SESSION_TTL = 86400.0
 
 # 登录页：只在设置了 token 的管理面上出现；回环信任模式直接进面板。
 LOGIN_HTML = """<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>relay-hub 管理面登录</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>__SITE__ 管理面登录</title>
 <style>
  body{font-family:system-ui,sans-serif;display:flex;justify-content:center;padding-top:18vh;background:#111;color:#eee}
  form{background:#1c1c1e;padding:2rem 2.5rem;border-radius:12px;min-width:320px}
@@ -89,7 +92,7 @@ LOGIN_HTML = """<!doctype html>
  .err{color:#f87171;min-height:1.2em;font-size:.85rem}
 </style></head><body>
 <form onsubmit="return doLogin()">
- <h1>relay-hub 号池管理 · Key Pool Admin</h1>
+ <h1>__SITE__ 号池管理 · Key Pool Admin</h1>
  <label>管理面 token / Admin token</label>
  <input id="token" type="password" autofocus>
  <label>动态码 / TOTP（未启用留空）</label>
@@ -282,7 +285,12 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _site_name(self) -> str:
+        """当前站点名（登录页/控制台标题用），随 site.json 改动即时生效。"""
+        return site_module.load_site(paths.site_path()).name
+
     def _send_html(self, html: str) -> None:
+        html = site_module.render(html, self._site_name())
         raw = html.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -403,6 +411,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         return {
             "pool_path": str(self.pool_path),
             "exists": self.pool_path.is_file(),
+            "site_name": site_module.load_site(paths.site_path()).name,
             "strategy": pool.strategy,
             "strategies": list(STRATEGIES),
             "failure_threshold": pool.failure_threshold,
@@ -470,6 +479,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             "/api/toip/otpauth": self._toip_otpauth,
             "/api/webui": self._webui_state,
             "/api/policy": lambda: self.server.policy.state(),
+            "/api/features": lambda: features_module.load(paths.features_path()),
         }
         if path in read_routes:
             if not self._authorized():
@@ -504,11 +514,39 @@ class AdminHandler(BaseHTTPRequestHandler):
         known = parts[:2] in (
             ["api", "keys"], ["api", "tokens"],
             ["api", "users"], ["api", "codes"], ["api", "policy"],
+            ["api", "newapi"], ["api", "features"],
         ) or parts in (
             ["api", "settings"], ["api", "webui"],
         )
         if not known:
             self._error(404, f"未知路径 {self.path}")
+            return
+
+        if parts == ["api", "features"]:
+            if method == "GET":
+                self._send_json(200, features_module.load(paths.features_path()))
+                return
+            if method == "POST":
+                body = self._read_json() or {}
+                values = features_module.save(paths.features_path(), body)
+                audit_module.record(
+                    "features.update",
+                    path=self.server.audit_path,  # type: ignore[attr-defined]
+                    values=json.dumps(values, ensure_ascii=False),
+                )
+                self._send_json(200, values)
+                return
+            self._error(405, "GET 或 POST")
+            return
+
+        if parts[:2] == ["api", "newapi"]:
+            if parts == ["api", "newapi"] and method == "POST":
+                self._newapi_probe()
+                return
+            if parts == ["api", "newapi", "cost"] and method == "POST":
+                self._newapi_cost()
+                return
+            self._error(405, "用 POST：/api/newapi 或 /api/newapi/cost")
             return
 
         if parts == ["api", "policy"]:
@@ -704,6 +742,23 @@ class AdminHandler(BaseHTTPRequestHandler):
         body = self._read_json()
         if body is None:
             return
+        # 站点个性化命名（对标 new-api 的 SystemName）：可单独改，不牵动号池。
+        if body.get("site_name") is not None:
+            site = site_module.save_site(paths.site_path(), body["site_name"])
+            audit_module.record(
+                "site.rename",
+                path=self.server.audit_path,  # type: ignore[attr-defined]
+                name=site.name,
+            )
+        site_only = (
+            body.get("site_name") is not None
+            and not str(body.get("strategy") or "")
+            and "failure_threshold" not in body
+            and "cooldown_tiers" not in body
+        )
+        if site_only:
+            self._send_json(200, self._state())
+            return
         try:
             strategy = str(body.get("strategy") or "")
             threshold = int(body.get("failure_threshold") or 0)
@@ -880,6 +935,12 @@ class AdminHandler(BaseHTTPRequestHandler):
         if method == "PUT":
             body = self._read_json() or {}
             changes = []
+            # 密码强度与注册同一门槛（>=8）。不校验的话管理面能把别人密码重置成
+            # "1"，等于绕过 UserPool.register 的约束。
+            new_password = str(body.get("password") or "")
+            if new_password and len(new_password) < 8:
+                self._error(400, "密码至少 8 位")
+                return
 
             def apply(user: User) -> None:
                 if "enabled" in body:
@@ -895,8 +956,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if body.get("group"):
                     user.group = str(body["group"]).strip()
                     changes.append(f"group={user.group}")
-                if body.get("password"):
-                    user.password_hash = hash_password(str(body["password"]))
+                if new_password:
+                    user.password_hash = hash_password(new_password)
                     changes.append("password=重置")
 
             try:
@@ -1221,6 +1282,46 @@ class AdminHandler(BaseHTTPRequestHandler):
             "tokens": TokenPool.load(self.server.tokens_path).stats()["tokens"],  # type: ignore[attr-defined]
         }
 
+    def _newapi_probe(self) -> None:
+        """查 new-api 站点的额度/用量/分组倍率（管理面功能，仅管理员可用）。"""
+        body = self._read_json() or {}
+        base_url = str(body.get("base_url") or "").strip()
+        api_key = str(body.get("api_key") or "").strip()
+        start = str(body.get("start_date") or "").strip() or None
+        end = str(body.get("end_date") or "").strip() or None
+        try:
+            snap = newapi_module.snapshot(
+                base_url, api_key, start_date=start, end_date=end
+            )
+        except newapi_module.NewApiError as exc:
+            self._error(400, str(exc))
+            return
+        audit_module.record(
+            "newapi.probe",
+            path=self.server.audit_path,  # type: ignore[attr-defined]
+            base_url=snap.get("base_url"),
+        )
+        self._send_json(200, snap)
+
+    def _newapi_cost(self) -> None:
+        """按 X-Oneapi-Request-Id 查单次请求的精确消耗。"""
+        body = self._read_json() or {}
+        try:
+            result = newapi_module.request_cost(
+                str(body.get("base_url") or "").strip(),
+                str(body.get("api_key") or "").strip(),
+                str(body.get("request_id") or "").strip(),
+            )
+        except newapi_module.NewApiError as exc:
+            self._error(400, str(exc))
+            return
+        audit_module.record(
+            "newapi.cost",
+            path=self.server.audit_path,  # type: ignore[attr-defined]
+            request_id=str(body.get("request_id") or "").strip(),
+        )
+        self._send_json(200, {"ok": True, "result": result})
+
     def _audit_state(self) -> dict[str, Any]:
         query = parse_qs(urlsplit(self.path).query)
         limit = min(int((query.get("limit") or ["100"])[0] or 100), 1000)
@@ -1529,7 +1630,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>中转站控制台</title>
+<title>__SITE__ · 控制台</title>
 <style>
 :root{--bg:#F7F6F3;--panel:#FFFFFF;--fg:#26215C;--muted:#5F5E5A;--line:#E3E1DA;
 --accent:#185FA5;--accent-soft:#E6F1FB;--ok:#0F6E56;--ok-soft:#E1F5EE;--warn:#854F0B;
@@ -1603,7 +1704,7 @@ display:none;border:1px solid var(--line);background:var(--panel)}
 <body>
 <div class="wrap">
 <header>
-  <h1>中转站控制台</h1>
+  <h1 id="site-h1">__SITE__ · 控制台</h1>
   <div class="meta" id="meta"></div>
   <div class="spacer"></div>
   <label style="flex-direction:row;align-items:center;gap:6px">
@@ -1624,6 +1725,7 @@ display:none;border:1px solid var(--line);background:var(--panel)}
   <span class="gap"></span>
   <button data-tab="requests">请求</button>
   <button data-tab="usage">用量</button>
+  <button data-tab="newapi">账单</button>
   <button data-tab="plugins">插件</button>
   <button data-tab="toip">动态口令</button>
   <button data-tab="theme">外观</button>
@@ -1650,6 +1752,15 @@ display:none;border:1px solid var(--line);background:var(--panel)}
 <section class="cards" id="cards"></section>
 
 <section class="panel">
+  <h2>站点</h2>
+  <div class="row">
+    <label>站点名称 <input id="site-name" placeholder="relay-hub" style="min-width:200px"></label>
+    <button id="save-site">保存名称</button>
+  </div>
+  <p class="hint">显示在用户面板、落地页与管理面的标题上；留空恢复默认 relay-hub。</p>
+</section>
+
+<section class="panel">
   <h2>调度与熔断</h2>
   <div class="row">
     <label>调度策略 <select id="strategy"></select></label>
@@ -1659,7 +1770,7 @@ display:none;border:1px solid var(--line);background:var(--panel)}
     <label>err 冷却秒 <input type="number" id="tier-err" min="1" step="1" style="min-width:76px"></label>
     <button id="save-settings">保存</button>
   </div>
-  <p class="hint">改动立刻写盘，网关会热加载——不用重启，也不会掐断正在答题的客户端。
+  <p class="hint">改动立刻写盘，网关会热加载——不用重启，也不会掐断正在处理的请求。
   四档冷却里 disable 不在此列：它没有时长，是 401/403 触发的禁用，只能人工 enable 恢复。</p>
 </section>
 
@@ -1706,7 +1817,7 @@ display:none;border:1px solid var(--line);background:var(--panel)}
 <section class="panel">
   <h2>发放下游令牌</h2>
   <div class="row">
-    <label>设备名 <input id="t-name" placeholder="教室平板-01"></label>
+    <label>设备名 <input id="t-name" placeholder="平板-01"></label>
     <label>分组 <input id="t-group" placeholder="default（如 class-2 / vip）"></label>
     <label>渠道组 <input id="t-channel-group" placeholder="留空 = 不限（free/paid/stable…）"></label>
     <label>模型限制 <input id="t-models" placeholder="逗号分隔；留空 = 不限制"></label>
@@ -1737,7 +1848,7 @@ display:none;border:1px solid var(--line);background:var(--panel)}
   </table></div>
   <p class="hint">分组筛选：
     <select id="t-filter" style="min-width:130px"><option value="">全部分组</option></select>
-    （发放时填了分组的令牌可按组筛选/汇总，适合按班级/批次管理）</p>
+    （发放时填了分组的令牌可按组筛选/汇总，适合按批次/分组管理）</p>
 </section>
 </div>
 
@@ -1847,6 +1958,45 @@ display:none;border:1px solid var(--line);background:var(--panel)}
   </div>
   <h2 style="margin-top:12px">按日</h2>
   <table><tbody id="u-day"></tbody></table>
+</section>
+</div>
+
+<div class="pane" id="pane-newapi" style="display:none">
+<section class="panel">
+  <h2>new-api 账单</h2>
+  <p class="hint">查上游 / 同学 new-api 站点的真实余额与单价。密钥只用于本次查询，不落盘、不进审计。</p>
+  <div class="row">
+    <label>站点地址 <input id="na-base" placeholder="https://example.com" style="min-width:240px"></label>
+    <label>API Key <input id="na-key" type="password" placeholder="sk-..." style="min-width:200px"></label>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <label>开始 <input id="na-start" type="date"></label>
+    <label>结束 <input id="na-end" type="date"></label>
+    <button id="na-load">查询余额</button>
+  </div>
+  <p class="hint" id="na-msg"></p>
+  <div id="na-out"></div>
+</section>
+<section class="panel">
+  <h2>单次请求成本</h2>
+  <p class="hint">request_id 取自上游响应头 <code>X-Oneapi-Request-Id</code>。</p>
+  <div class="row">
+    <label>Request ID <input id="na-rid" placeholder="2026..." style="min-width:320px"></label>
+    <button id="na-cost">查单次成本</button>
+  </div>
+  <p class="hint" id="na-cost-msg"></p>
+</section>
+<section class="panel">
+  <h2>本站在线查询（billing 接口）</h2>
+  <p class="hint">开启后，下游用自己的令牌即可访问 <code>/v1/dashboard/billing/subscription</code> 与
+  <code>/v1/dashboard/billing/usage</code>（对标 new-api）。默认关闭，改完即时生效、无需重启。</p>
+  <div class="row">
+    <label style="flex-direction:row;align-items:center;gap:6px">
+      <input type="checkbox" id="feat-billing" style="min-width:auto"> 开放 billing 接口
+    </label>
+    <button id="feat-save">保存</button>
+    <span class="mono" id="feat-msg"></span>
+  </div>
 </section>
 </div>
 
@@ -1967,6 +2117,11 @@ function statusTag(k){
 
 function render(){
   if(!state){return;}
+  var sn=state.site_name||'relay-hub';
+  document.title=sn+' · 控制台';
+  var h1=document.getElementById('site-h1');if(h1){h1.textContent=sn+' · 控制台';}
+  var si=document.getElementById('site-name');
+  if(si&&document.activeElement!==si){si.value=sn;}
   document.getElementById('meta').textContent=state.pool_path;
   var t=state.totals;
   document.getElementById('cards').innerHTML=
@@ -2097,6 +2252,11 @@ document.getElementById('save-settings').onclick=function(){
   }).then(function(s){state=s;render();toast('设置已保存',true);})
     .catch(function(e){toast('保存失败：'+e.message,false);});
 };
+document.getElementById('save-site').onclick=function(){
+  api('PUT','/api/settings',{site_name:document.getElementById('site-name').value})
+    .then(function(s){state=s;render();toast('站点名称已保存',true);})
+    .catch(function(e){toast('保存失败：'+e.message,false);});
+};
 
 document.getElementById('rows').onclick=function(ev){
   var b=ev.target.closest('button');if(!b){return;}
@@ -2153,6 +2313,7 @@ function loadPane(name){
   if(name==='users'){loadUsers();return;}
   if(name==='requests'){loadRequests();return;}
   if(name==='usage'){loadUsage();return;}
+  if(name==='newapi'){naInit();return;}
   if(name==='plugins'){loadPlugins();return;}
   if(name==='toip'){loadToip();return;}
   if(name==='theme'){loadTheme();return;}
@@ -2162,6 +2323,63 @@ function loadPane(name){
 document.getElementById('tabs').onclick=function(ev){
   var b=ev.target.closest('button');if(!b){return;}
   switchTab(b.dataset.tab);
+};
+
+// ---- new-api 账单（管理员功能） ----
+
+function naInit(){
+  var s=document.getElementById('na-start'), e=document.getElementById('na-end');
+  if(!e.value){e.value=new Date().toISOString().slice(0,10);}
+  if(!s.value){s.value=new Date(Date.now()-29*864e5).toISOString().slice(0,10);}
+  loadFeatures();
+}
+function naFmt(v){return (v==null)?'—':(Math.round(v*10000)/10000);}
+function renderNewApi(s){
+  var unit=s.unit||'USD';
+  var rows=[['总额度',naFmt(s.hard_limit)+' '+unit],
+            ['已用',naFmt(s.used)+' '+unit],
+            ['剩余',naFmt(s.remaining)+' '+unit]];
+  var body=rows.map(function(r){
+    return '<tr><td>'+esc(r[0])+'</td><td class="mono">'+esc(r[1])+'</td></tr>';}).join('');
+  var groups=(s.groups?JSON.stringify(s.groups):'—');
+  document.getElementById('na-out').innerHTML=
+    '<div style="overflow-x:auto"><table><thead><tr><th>项</th><th>值</th></tr></thead><tbody>'+body+'</tbody></table></div>'+
+    '<p class="hint">单位 <b>'+esc(unit)+'</b>（站点 quota_display_type）；已用 = total_usage / 100（分→元）。'+
+    '<br>分组倍率：<code>'+esc(groups)+'</code>'+
+    (s.model_count!=null?('　模型数：'+s.model_count):'')+'</p>';
+}
+document.getElementById('na-load').onclick=function(){
+  var msg=document.getElementById('na-msg');
+  msg.textContent='查询中…'; document.getElementById('na-out').innerHTML='';
+  api('POST','/api/newapi',{
+    base_url:document.getElementById('na-base').value.trim(),
+    api_key:document.getElementById('na-key').value,
+    start_date:document.getElementById('na-start').value,
+    end_date:document.getElementById('na-end').value
+  }).then(function(s){msg.textContent='';renderNewApi(s);})
+    .catch(function(e){msg.textContent='失败：'+e.message;});
+};
+document.getElementById('na-cost').onclick=function(){
+  var msg=document.getElementById('na-cost-msg'); msg.textContent='查询中…';
+  api('POST','/api/newapi/cost',{
+    base_url:document.getElementById('na-base').value.trim(),
+    api_key:document.getElementById('na-key').value,
+    request_id:document.getElementById('na-rid').value.trim()
+  }).then(function(s){msg.textContent='成本：'+JSON.stringify(s.result);})
+    .catch(function(e){msg.textContent='失败：'+e.message;});
+};
+
+function loadFeatures(){
+  api('GET','/api/features').then(function(f){
+    var cb=document.getElementById('feat-billing');
+    if(cb){cb.checked=!!f.billing_enabled;}
+  }).catch(function(){});
+}
+document.getElementById('feat-save').onclick=function(){
+  var msg=document.getElementById('feat-msg'); msg.textContent='保存中…';
+  api('POST','/api/features',{billing_enabled:document.getElementById('feat-billing').checked})
+    .then(function(f){msg.textContent='已保存（下一请求生效）';})
+    .catch(function(e){msg.textContent='失败：'+e.message;});
 };
 
 // ---- 客户端总览 ----
@@ -2800,7 +3018,15 @@ switchTab('clients');
     "还没有用户。":"No users yet.","还没有兑换码。":"No redeem codes yet.",
     "还没有任何请求流量。":"No request traffic yet.",
     "常用模型":"Common models","应用":"App","开放":"Open","归因":"Attribution",
-    "无动作":"None","连续失败":"Consecutive failures","模型窗口":"Model windows"
+    "无动作":"None","连续失败":"Consecutive failures","模型窗口":"Model windows",
+    "站点":"Site","站点名称":"Site Name","保存名称":"Save Name",
+    "账单":"Billing","new-api 账单":"new-api Billing","站点地址":"Station URL",
+    "开始":"Start","结束":"End","查询余额":"Check Balance",
+    "单次请求成本":"Per-request Cost","查单次成本":"Look up cost",
+    "本站在线查询（billing 接口）":"This station's billing API",
+    "开放 billing 接口":"Enable billing API","项":"Item",
+    "总额度":"Total Credit","已用":"Used","剩余":"Remaining",
+    "显示在用户面板、落地页与管理面的标题上；留空恢复默认 relay-hub。":"Shown as the title on the user panel, landing page and admin console; leave blank to restore the default relay-hub."
   };
   var en = false, btn;
   function walk(node){

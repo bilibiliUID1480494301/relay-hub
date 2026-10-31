@@ -950,3 +950,55 @@ class _NoopThread:
 
     def join(self, timeout: float | None = None) -> None:
         return
+
+
+def test_openai_stream_client_usage_keeps_prompt_tokens(tmp_path: Path) -> None:
+    """OpenAI 兼容上游的 usage 只在流尾 chunk 给出；客户端可见的
+    chat.completion.chunk 里的 usage.prompt_tokens 必须是真值，不能恒为 0。
+
+    new-api 对照暴露：修复前 _stream_openai_as_anthropic 只把 output_tokens 放进
+    message_delta，而 openai_chunks 从 message_start 取 prompt_tokens（此时上游
+    还没给）恒得 0 → total_tokens 也少算。
+    """
+    from relayhub.gateway.pool import PROTOCOL_OPENAI_CHAT
+
+    with FakeUpstream(protocol=PROTOCOL_OPENAI_CHAT) as upstream:
+        router = KeyPoolRouter(
+            KeyPool([make_key("up", upstream.base_url, protocol=PROTOCOL_OPENAI_CHAT)])
+        )
+        server = RelayServer(
+            ("127.0.0.1", 0),
+            router,
+            api_key=API_KEY,
+            event_delay=0.0,
+            tokens=_token_store(tmp_path),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            probe = conformance.Probe(server.base_url, TOKENS["app-b"])
+            body = {
+                "model": "glm-5.2",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+            response, lines = probe.post(
+                "/v1/chat/completions", body, streaming=True, read_stream=True
+            )
+            assert response.status == 200
+            usage = None
+            for _event, data in conformance.parse_sse(lines):
+                if not data or data == "[DONE]":
+                    continue
+                chunk = json.loads(data)
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+            assert usage is not None, "openai 流式响应缺 usage chunk"
+            assert usage["prompt_tokens"] == 7, usage
+            assert usage["completion_tokens"] == 5, usage
+            assert usage["total_tokens"] == 12, usage
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)

@@ -65,7 +65,12 @@ class RelayOutcome:
 
 
 class _TokenSink:
-    """承接流式流尾才到达的 usage（缓存命中在 message_start 里就位）。"""
+    """承接流式流尾才到达的 usage。
+
+    缓存字段必须一起接：流尾那份 usage 里就有 `prompt_cache_hit_tokens` /
+    `cached_tokens`。早先只接 input/output，等于**流式请求的缓存命中恒记 0**，
+    报表永远是假的（非流式反而正常，所以不容易发现）。
+    """
 
     def __init__(self) -> None:
         self.input = 0
@@ -73,9 +78,14 @@ class _TokenSink:
         self.cache_read = 0
         self.cache_creation = 0
 
-    def __call__(self, tokens_in: int, tokens_out: int) -> None:
+    def __call__(
+        self, tokens_in: int, tokens_out: int,
+        cache_read: int = 0, cache_creation: int = 0,
+    ) -> None:
         self.input = tokens_in
         self.output = tokens_out
+        self.cache_read = cache_read
+        self.cache_creation = cache_creation
 
 
 class ExitGuard:
@@ -94,10 +104,12 @@ class ExitGuard:
         self._lock = threading.Lock()
         self._sends: dict[tuple[str, str], list[float]] = {}
 
-    def allow(self, fingerprint: str, upstream: str) -> bool:
+    def allow(self, fingerprint: str, upstream: str, scope: str = "") -> bool:
         now = time.monotonic()
         with self._lock:
-            key = (fingerprint, upstream)
+            # scope = 下游身份（令牌哈希/名字）：按「谁」分桶——
+            # 一个用户反复发同一句不该占掉另一个用户的短时重发额度。
+            key = (scope, fingerprint, upstream)
             hits = [t for t in self._sends.get(key, ()) if now - t < self.WINDOW]
             if len(hits) >= self.LIMIT:
                 self._sends[key] = hits
@@ -146,6 +158,7 @@ class KeyPoolRouter:
         trace_headers: dict[str, str] | None = None,
         fp: str | None = None,
         group: str | None = None,
+        guard_scope: str | None = None,
     ) -> RelayOutcome:
         candidates = self.pool.candidates(model, group=group)
         if not candidates:
@@ -156,13 +169,20 @@ class KeyPoolRouter:
             )
 
         attempts: list[str] = []
+        skipped: list[str] = []
         last: UpstreamError | None = None
         # retries：同一渠道的尝试次数（对标 new-api 的可配重试）。
         # 1 = 现状（失败就换下一家）；>1 = 先在本渠道快速重试 N 次再切换，
         # 适合「上游偶发抖动」比「切渠道成本高」的场景。
         for key in candidates:
-            if fp is not None and not _EXIT_GUARD.allow(fp, key.label):
-                # 出口查重：同指纹对同上游高频重发 → 跳过该候选（疑似环路）
+            if fp is not None and not _EXIT_GUARD.allow(
+                fp, key.label, scope=guard_scope or ""
+            ):
+                # 出口查重：同指纹对同上游高频重发 → 跳过该候选（疑似环路）。
+                # **必须记下来**：全被跳过时 attempts 是空的，下面的报错若不区分，
+                # 会说出「全部 0 个渠道都失败，最后一个错误：None」这种既谎报渠道数、
+                # 又谎报状态码（502 暗示上游挂了，其实是本地临时限制）的话。
+                skipped.append(key.label)
                 continue
             for attempt in range(max(1, self.pool.retries)):
                 attempts.append(key.label if attempt == 0 else f"{key.label}#{attempt + 1}")
@@ -175,6 +195,16 @@ class KeyPoolRouter:
                     self.pool.report_failure(key, exc, trip=exc.retryable)
                     self._persist()
                     continue
+        if not attempts:
+            # 所有候选都被出口查重挡下：这是**本地的临时限制**，不是上游故障。
+            raise RouterError(
+                f"同一请求内容在 {ExitGuard.WINDOW:g} 秒内对同一上游重复过密，"
+                f"已临时跳过 {len(skipped)} 个渠道"
+                + (f"（{', '.join(skipped[:4])}）" if skipped else "")
+                + "。这通常是自动重发或转发环路，请稍后重试。",
+                status=429,
+                attempts=attempts,
+            )
         raise RouterError(f"全部 {len(attempts)} 个渠道都失败，最后一个错误：{last}", attempts)
 
     def relay_embeddings(
@@ -425,8 +455,8 @@ def config_fingerprint(path: Path) -> object:
 class ReloadingRouter:
     """包住 KeyPoolRouter：号池文件被外部改动（比如刚跑了一次 `pool add`）就重新加载。
 
-    为什么不干脆重启中转站：重启会掐掉正在答题的客户端手上的在途请求。
-    老师机上加一个上游 Key 不该有这个副作用。
+    为什么不干脆重启中转站：重启会掐掉正在处理的客户端手上的在途请求。
+    运维机上加一个上游 Key 不该有这个副作用。
 
     **并发安全**：本类每请求都会探测指纹。文件正被另一个进程重写的瞬间，
     读到的可能是空/半截内容——此时必须「按兵不动」沿用现有路由表，

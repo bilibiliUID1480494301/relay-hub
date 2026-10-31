@@ -421,7 +421,7 @@ def test_page_is_served_and_has_no_secret(tmp_path: Path) -> None:
     with admin_for(path) as base:
         status, html = call(base, "GET", "/")
     assert status == 200
-    assert "中转站控制台" in html
+    assert "relay-hub · 控制台" in html
     assert 'data-tab="clients"' in html
     assert SECRET not in html
     # 页面必须自己带 XSS 转义，否则上游回的错误信息能被当成 HTML 执行

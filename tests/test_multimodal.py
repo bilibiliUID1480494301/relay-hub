@@ -1,6 +1,6 @@
 """多模态与联网搜索的方言互译测试（upstream 的图片/搜索透传）。
 
-搜题场景的核心链路：App 发带图消息 → 网关翻成上游方言 → 上游识图/搜索。
+多模态链路：App 发带图消息 → 网关翻成上游方言 → 上游识图/搜索。
 任何一侧把图片块弄丢或翻错，表现出来都是「模型看不到图」这类静默错误，
 所以这里全部做结构级断言。
 """
@@ -20,7 +20,7 @@ OPENAI_IMAGE_URL = {"type": "image_url", "image_url": {"url": "data:image/png;ba
 
 def test_anthropic_image_block_becomes_openai_image_url() -> None:
     out = upstream.to_openai_request(
-        {"model": "m", "max_tokens": 8, "messages": [{"role": "user", "content": [{"type": "text", "text": "看图答题"}, ANTHROPIC_IMAGE]}]}
+        {"model": "m", "max_tokens": 8, "messages": [{"role": "user", "content": [{"type": "text", "text": "看图回答"}, ANTHROPIC_IMAGE]}]}
     )
     (msg,) = out["messages"]
     assert isinstance(msg["content"], list)
@@ -135,3 +135,82 @@ def test_openai_audio_still_rejected() -> None:
                 ],
             }
         )
+
+
+# ---------------------------------------------------------------- tool_result 图片
+
+
+def test_tool_result_image_survives_anthropic_to_openai() -> None:
+    """截图类工具的结果图：tool_result content 带图时翻成块数组，不再被摊平。"""
+    out = upstream.to_openai_request(
+        {
+            "model": "m",
+            "max_tokens": 8,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu_1",
+                            "content": [{"type": "text", "text": "截图："}, ANTHROPIC_IMAGE],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    (tool,) = out["messages"]
+    assert tool["role"] == "tool"
+    assert tool["tool_call_id"] == "tu_1"
+    assert isinstance(tool["content"], list)
+    kinds = [p["type"] for p in tool["content"]]
+    assert kinds == ["text", "image_url"]
+    assert tool["content"][1]["image_url"]["url"] == "data:image/png;base64,aGk="
+
+
+def test_tool_result_text_only_stays_a_plain_string() -> None:
+    """没图的 tool_result 保持字符串——绝大多数上游只认这个形状。"""
+    out = upstream.to_openai_request(
+        {
+            "model": "m",
+            "max_tokens": 8,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu_1",
+                            "content": [{"type": "text", "text": "晴 25℃"}],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    (tool,) = out["messages"]
+    assert tool["content"] == "晴 25℃"
+
+
+def test_openai_tool_message_image_url_becomes_anthropic_block() -> None:
+    """反向：OpenAI 入站的 tool 消息带 image_url → Anthropic tool_result 图片块。"""
+    out = upstream.to_anthropic_request(
+        {
+            "model": "m",
+            "max_tokens": 8,
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": [{"type": "text", "text": "截图："}, OPENAI_IMAGE_URL],
+                }
+            ],
+        }
+    )
+    (msg,) = out["messages"]
+    (tr,) = msg["content"]
+    assert tr["type"] == "tool_result"
+    assert tr["tool_use_id"] == "call_1"
+    assert tr["content"][0] == {"type": "text", "text": "截图："}
+    assert tr["content"][1]["source"] == {"type": "base64", "media_type": "image/png", "data": "aGk="}

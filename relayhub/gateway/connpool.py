@@ -11,6 +11,8 @@
 2. 发送前显式 `Connection: keep-alive`；读完整响应体（含流式读完）后连接可复用。
 3. 空闲超过 IDLE_TTL（默认 60s）或出错即丢弃重建——上游可能已单方关闭。
 4. 池大小按线程自动有界（每线程每个 endpoint 最多 1 条），不会无限增长。
+5. 归还/复用前用 `_idle_state` 二次核验连接确实空闲（state==_CS_IDLE 且响应对象
+   已关闭），避免复用未读完的流式连接撞 `ResponseNotReady: Request-sent`。
 
 对使用者透明：`_open()` 返回的仍是 HTTPConnection，调用方照旧 `.request()/.getresponse()`，
 只是 `close()` 语义从「关 socket」变成「归还池」（见 `release()`）。
@@ -21,7 +23,7 @@ import select
 import socket
 import threading
 import time
-from http.client import HTTPConnection, HTTPSConnection
+from http.client import HTTPConnection, HTTPSConnection, _CS_IDLE
 from typing import Any
 
 IDLE_TTL = 60.0      # 空闲超过此秒数的连接直接丢弃（上游常在此后单方 FIN）
@@ -44,6 +46,39 @@ def _bucket() -> dict:
     return b
 
 
+def _idle_state(conn: HTTPConnection) -> bool:
+    """连接是否真的处于「可以安全发下一个请求」的状态。
+
+    两个条件都要满足，缺一个就会在下一个请求上炸：
+
+    1. `__state == _CS_IDLE`——不是的话 `request()` 抛 `CannotSendRequest`。
+    2. **没有未关闭的响应对象**——`getresponse()` 的条件是
+       `state != _CS_REQ_SENT or self.__response`，只要 `__response` 还在就抛
+       `ResponseNotReady`。
+
+    第 2 条是流式场景的真正凶手：SSE 解析遇到 `data: [DONE]` 就 break，
+    此时 HTTP 响应体**没读完**（分块结束符还在），但 `__state` 早已被
+    `getresponse()` 置成 Idle。只看 state 会把它当"可复用"归还，
+    下一条请求就撞 `ResponseNotReady: Request-sent`。
+
+    注意：**读完** body 之后 `__response` 仍然非 None，但它的 `isclosed()` 为真，
+    此时复用是安全的（`putrequest()` 会把已关闭的 response 清掉）。
+    所以判据是「不存在，或已关闭」，而不是"必须为 None"。
+    """
+    state = getattr(conn, "_HTTPConnection__state", None)
+    if state is None:
+        return True  # 测试替身/其他实现没有这个字段：按可复用处理
+    if state != _CS_IDLE:
+        return False
+    response = getattr(conn, "_HTTPConnection__response", None)
+    if response is None:
+        return True
+    try:
+        return bool(response.isclosed())
+    except Exception:
+        return False  # 判不了就按不可复用处理
+
+
 def acquire(scheme: str, host: str, port: int, timeout: float) -> HTTPConnection:
     """取一条可复用连接：优先命中同线程缓存，否则新建。"""
     key = (scheme, host, port)
@@ -51,8 +86,8 @@ def acquire(scheme: str, host: str, port: int, timeout: float) -> HTTPConnection
     cached = bucket.get(key)
     if cached is not None:
         conn = cached.conn
-        # 过期 / 已被上游关闭 → 丢弃重建
-        if (time.monotonic() - cached.used_at) <= IDLE_TTL and _alive(conn):
+        # 过期 / 已被上游关闭 / 状态不是空闲 → 丢弃重建
+        if (time.monotonic() - cached.used_at) <= IDLE_TTL and _alive(conn) and _idle_state(conn):
             conn.timeout = timeout  # 复用连接时刷新超时（http.client 允许改）
             return conn
         try:
@@ -107,7 +142,7 @@ def release(conn: HTTPConnection, reusable: bool = True) -> None:
 
     调用方在「完整读出响应体」时传 reusable=True；异常/半途放弃时传 False。
     """
-    if reusable and _alive(conn):
+    if reusable and _alive(conn) and _idle_state(conn):
         # 记住所属桶：按连接自身的 host/port 反查不现实，直接扫本线程桶找它
         for cached in _bucket().values():
             if cached.conn is conn:

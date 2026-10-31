@@ -15,6 +15,7 @@
 | 用户 | 用户 CRUD、计费规则（标价 / 分组倍率 / **峰时分时**）、开放注册、兑换码批量生成 |
 | 请求 / 用量 | 请求日志明细；用量汇总卡片（请求/成功/失败/tokens/**收入/上游成本/利润**）+ 按日/令牌/模型/渠道分桶 |
 | 插件 / 动态口令 / 审计 | 插件分账日志、TOIP 站点口令、审计流水 |
+| 账单 | 上游 new-api 余额/倍率/单次成本（管理员）；勾选开放本站 billing 接口 |
 
 ## 页面自定义（主题令牌）
 
@@ -49,6 +50,34 @@ python -c "import base64,os;print(base64.b32encode(os.urandom(20)).decode())"
 
 - **用户密码永远是静态的**（SHA-256 落盘）：动态码只用于管理员，避免用户被锁死在门外。
 
+## 账单与功能开关
+
+管理面「账单」页分两块，**权限与开关不同**：
+
+1. **上游 new-api 查询（仅管理员）**：填站点地址 + Key，查总额度 / 已用 / 剩余 / 单位 / 分组倍率；
+   另可按 `X-Oneapi-Request-Id` 查单次成本。密钥**只用于本次查询**：不落盘、不进审计。
+   实现见 `relayhub/gateway/newapi.py`；口径详见 [BILLING.md](BILLING.md)。
+2. **本站 billing 开关**：勾选「开放 billing 接口」后，下游可用自己的令牌访问
+   `GET /v1/dashboard/billing/subscription` 与 `/usage`（默认**关闭**，改完下一请求生效）。
+   开关落在 `<RELAYHUB_HOME>/features.json`（`billing_enabled`）。
+
+## 站点个性化命名
+
+管理面「站点」区块可改站点名称（默认 `relay-hub`），显示在用户面板、落地页、管理面登录页与控制台标题上；
+存 `<RELAYHUB_HOME>/site.json`，留空恢复默认，改完即时生效（无需重启）。
+
+## 用户与管理员 CLI
+
+`users.json` 没有管理员时管理面是**锁死**的。用 CLI 建站长 / 救密码：
+
+```bash
+python -m relayhub.gateway users init                  # 随机 16 位密码，只打印一次；quota=-1
+python -m relayhub.gateway users reset-password        # 服务端强制重置（面板进不去也能救）
+python -m relayhub.gateway users ls                    # 列出用户 / 角色 / 额度
+```
+
+密码门槛 **≥ 8 位**（注册、管理面重置、CLI 三处一致）。
+
 ## API 一览（管理面 HTTP 接口）
 
 - `GET /api/state`：渠道/令牌/健康总览
@@ -57,3 +86,6 @@ python -c "import base64,os;print(base64.b32encode(os.urandom(20)).decode())"
 - `GET /api/users` / `POST /api/users` / `PUT /api/users`：用户与计费规则（PUT 含 peak_hours / peak_multiplier）
 - `POST /api/codes`：兑换码批量生成 `{count, credits}`
 - `GET /login` → `POST /login`：会话 cookie（HttpOnly）
+- `GET/POST /api/features`：功能开关（`billing_enabled` 等）
+- `POST /api/newapi`：查上游 new-api 余额 / 分组倍率（`{base_url, api_key, start_date, end_date}`）
+- `POST /api/newapi/cost`：按 `request_id`（`X-Oneapi-Request-Id`）查单次成本

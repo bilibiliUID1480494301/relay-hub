@@ -1,7 +1,7 @@
 """配对流程测试：窗口生命周期（服务级）+ HTTP 兑换（端到端）。
 
 配对是唯一一个「无凭证可达」的网关端点，所以这里的安全断言是硬性的：
-码错要限次、过期要拒、成功即焚、发放的令牌要真能答题。
+码错要限次、过期要拒、成功即焚、发放的令牌要真能用来请求。
 """
 
 from __future__ import annotations
@@ -149,7 +149,7 @@ def test_sandbox_audit_stays_in_sandbox(tmp_path: Path) -> None:
 
 
 def test_pair_endpoint_end_to_end(tmp_path: Path) -> None:
-    """开窗 → 无凭证 POST /v1/pair → 拿令牌 → 该令牌真能答题。"""
+    """开窗 → 无凭证 POST /v1/pair → 拿令牌 → 该令牌真能用来请求。"""
     from relayhub.gateway import conformance
 
     store = TokenStore(tmp_path / "tokens.json")

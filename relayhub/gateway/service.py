@@ -34,6 +34,9 @@ from . import mcp as mcp_module
 from . import clients as clients_module
 from . import pluginlogs
 from . import reqlog
+from . import features as features_module
+from . import site as site_module
+from . import responses_api
 from . import toip as toip_module
 from .router import RelayOutcome, RouterError
 
@@ -41,6 +44,7 @@ ident_module = None  # 未安装客户端扩展包时的占位：身份头整段
 from .tokens import SCOPE_TEST, DownstreamToken, TokenStore, generate_token
 from .upstream import UpstreamError, cache_from_usage, to_anthropic_request
 from .users import RedeemStore, UserError, UserStore
+from .users import can as user_can
 
 ANTHROPIC_VERSION = "2023-06-01"
 
@@ -285,20 +289,48 @@ def openai_completion(model: str, message: dict[str, Any]) -> dict[str, Any]:
 # ---------------- Responses API（OpenAI 新口 /v1/responses） ----------------
 
 
-def _responses_content_text(content):
-    """Responses 的 content（str / list[input_text|output_text 块]）→ 纯文本。"""
+def _responses_content_parts(content):
+    """Responses 的 content → OpenAI chat 的 content。
+
+    纯文本返回字符串（chat 线协议的最简形状）；带 `input_image` 时返回块数组
+    （text + image_url parts）。图片**不能静默丢**：客户端发图就是为了让模型看，
+    吞掉只会得到文不对题的答案且不报错——下游 `_openai_user_content_to_anthropic`
+    认 image_url，会接着翻成 Anthropic 的 image 块。
+    """
     if content is None:
         return ""
     if isinstance(content, str):
         return content
-    parts = []
     items = content if isinstance(content, list) else [content]
+    parts = []
     for c in items:
-        if isinstance(c, dict):
-            parts.append(str(c.get("text") or c.get("content") or ""))
-        else:
-            parts.append(str(c))
-    return "".join(parts)
+        if isinstance(c, str):
+            if c:
+                if parts and parts[-1]["type"] == "text":
+                    parts[-1]["text"] += c
+                else:
+                    parts.append({"type": "text", "text": c})
+            continue
+        if not isinstance(c, dict):
+            continue
+        kind = c.get("type")
+        if kind in (None, "input_text", "output_text", "text"):
+            text = str(c.get("text") or "")
+            if text:
+                if parts and parts[-1]["type"] == "text":
+                    parts[-1]["text"] += text
+                else:
+                    parts.append({"type": "text", "text": text})
+        elif kind == "input_image":
+            url = c.get("image_url")
+            url = url.get("url") if isinstance(url, dict) else url
+            if isinstance(url, str) and url.strip():
+                parts.append({"type": "image_url", "image_url": {"url": url.strip()}})
+    if not parts:
+        return ""
+    if len(parts) == 1 and parts[0]["type"] == "text":
+        return parts[0]["text"]
+    return parts
 
 
 def responses_to_chat(body):
@@ -306,7 +338,8 @@ def responses_to_chat(body):
 
     input 支持 string 与 items 列表（message / function_call_output）；
     instructions 映射为 system；max_output_tokens 映射为 max_tokens；
-    reasoning 等网关无法透传的字段安全忽略。
+    `input_image` 图片块翻成 image_url parts（不静默丢）；
+    `reasoning.effort` 映射为 reasoning_effort（查表卡死只会让档位莫名不生效）。
     """
     msgs = []
     if body.get("instructions"):
@@ -329,10 +362,10 @@ def responses_to_chat(body):
             role = item.get("role", "user")
             if role not in ("user", "assistant", "system", "developer"):
                 role = "user"
-            text = _responses_content_text(item.get("content"))
+            content = _responses_content_parts(item.get("content"))
             if role == "developer":
                 role = "system"
-            msgs.append({"role": role, "content": text})
+            msgs.append({"role": role, "content": content})
     else:
         msgs.append({"role": "user", "content": ""})
 
@@ -343,6 +376,13 @@ def responses_to_chat(body):
             chat[k] = body[k]
     if body.get("max_output_tokens"):
         chat["max_tokens"] = body["max_output_tokens"]
+    # 推理档位透传： Responses 的 reasoning.effort → chat 的 reasoning_effort，
+    # 再由 to_anthropic_request 带进 IR、to_openai_request 映射给上游。
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = str(reasoning.get("effort") or "").strip().lower()
+        if effort:
+            chat["reasoning_effort"] = effort
     return chat
 
 
@@ -524,6 +564,9 @@ def openai_chunks(
                 str(delta.get("stop_reason")), finish_reason
             )
             usage = payload.get("usage") or {}
+            # OpenAI 上游的 input(prompt) tokens 在流尾 message_delta 才出现；
+            # Anthropic 上游则在 message_start 已给。两处都收，取最大值兜住。
+            tokens_in = max(tokens_in, int(usage.get("input_tokens") or 0))
             tokens_out = max(tokens_out, int(usage.get("output_tokens") or 0))
         elif name == "error":
             error = payload.get("error") or {}
@@ -652,9 +695,9 @@ class RateLimiter:
 
 
 class ConcurrencyGate:
-    """并发闸门 + 有限排队（搜题场景的「排队不拒绝」）+ 优先队列。
+    """并发闸门 + 有限排队（突发并发场景的「排队不拒绝」）+ 优先队列。
 
-    纯 429 限流在课堂场景体验很差：40 个学生同时交卷，只有前几个能拿到
+    纯 429 限流在突发场景体验很差：几十个客户端同时发起，只有前几个能拿到
     应答，剩下的直接失败还得手动重试。这里改成：在飞请求超过上限时进
     等待队列，排到就继续处理；只对两种情况才回 429——
       * 等待队列本身满了（说明排队也排不上了，硬拒）；
@@ -663,7 +706,7 @@ class ConcurrencyGate:
     **优先队列**：acquire(priority=True) 的请求排 VIP 队——名额一释放先
     唤醒 VIP 等待者，普通队只在无 VIP 时被叫醒；新到的 VIP 更是直接插队
     （有空位就拿走，不等普通等待者醒来再抢）。谁是 VIP 由 policy.py 的
-    优先名单决定（设备 ID / 令牌名 / IP），老师高峰期把自己或值班设备
+    优先名单决定（设备 ID / 令牌名 / IP），高峰时段管理员把自己或值班设备
     标优先即可。
 
     两个等待池共用同一把互斥锁（分别建 Condition），release 时刻意先叫
@@ -791,7 +834,7 @@ def _apply_panel_theme(html: str) -> str:
 
 PANEL_HTML = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>relay-hub 用户面板</title>
+<title>__SITE__ 用户面板</title>
 <style>
 body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;__THEME_BG__
 color:#26215C;margin:0;display:flex;justify-content:center;min-height:100vh}
@@ -812,9 +855,22 @@ dt{color:#5F5E5A}dd{margin:0;font-family:ui-monospace,Consolas,monospace;word-br
 .err{color:#A32D2D;font-size:12px;min-height:16px;margin:4px 0}
 .ok-msg{color:#0F6E56;font-size:12px;min-height:16px;margin:4px 0}
 h3{font-size:13px;color:#5F5E5A;margin:18px 0 8px;font-weight:500}
+/* 背景偏好：只改 body 底色，存 localStorage——纯客户端，不过服务器，
+   所以不需要后端字段，也不会把个人偏好写进任何日志。 */
+.swatches{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.swatch{width:26px;height:26px;border-radius:6px;border:1px solid #E3E1DA;cursor:pointer;padding:0}
+.swatch[data-active="1"]{outline:2px solid #185FA5;outline-offset:2px}
+.swatch-reset{font-size:11px;color:#5F5E5A;background:transparent;border:1px solid #E3E1DA;
+border-radius:6px;padding:4px 8px;cursor:pointer;width:auto}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.metric{background:#FBFAF8;border:1px solid #E3E1DA;border-radius:10px;padding:10px 12px}
+.metric .k{color:#5F5E5A;font-size:11px;margin-bottom:4px}
+.metric .v{font-size:15px;font-weight:600;font-family:ui-monospace,Consolas,monospace}
+.metric .v small{font-weight:400;color:#0F6E56;font-size:11px;margin-left:4px}
+
 </style></head><body><div class="box" id="app"></div>
 <script>
-var base='';
+
 function esc(s){var d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
 function h(html){document.getElementById('app').innerHTML=html;}
 function err(m){var e=document.getElementById('msg');if(e){e.textContent=m||'';}}
@@ -832,7 +888,7 @@ async function refresh(){
   renderHome(u);
 }
 function renderAuth(showRegister){
-  h('<h2>relay-hub 用户面板</h2><p class="sub">'+(showRegister?'注册或登录以获取 API Key':'登录以管理你的 API Key 与额度')+'</p>'+
+  h('<h2>__SITE__ 用户面板</h2><p class="sub">'+(showRegister?'注册或登录以获取 API Key':'登录以管理你的 API Key 与额度')+'</p>'+
     '<label>用户名</label><input id="u"><label>密码</label><input id="p" type="password">'+
     '<div class="err" id="msg"></div>'+
     '<div class="row"><button onclick="doLogin()">登录</button>'+
@@ -848,6 +904,75 @@ async function doRegister(){err('');var j=await api('/api/auth/register',{userna
   if(!j.ok){err(j.error);return;}
   renderHome({username:j.username,quota:j.quota,used:0,api_key_hint:'…'+j.token.slice(-4),unlimited:false});
   showKey(j.token);}
+var base='';
+var BG_KEY='relayhub_panel_bg';
+function applyBg(c){
+  if(c){document.body.style.background=c;}else{document.body.style.background='';}
+  try{
+    if(c){localStorage.setItem(BG_KEY,c);}else{localStorage.removeItem(BG_KEY);}
+  }catch(e){/* 隐私模式存不了就算了，本次会话仍然生效 */}
+  var sw=document.querySelectorAll('.swatch');
+  for(var i=0;i<sw.length;i++){
+    sw[i].setAttribute('data-active', sw[i].getAttribute('data-c')===c?'1':'0');
+  }
+}
+function bgBlock(){
+  var colors=['#F7F6F3','#EAF1F8','#EAF5EE','#F5EEE2','#F2ECF5'];
+  var dots=colors.map(function(c){
+    return '<button class="swatch" data-c="'+c+'" style="background:'+c+
+      '" onclick="applyBg(''+c+'')" title="'+c+'"></button>';
+  }).join('');
+  return '<h3>背景</h3><div class="swatches">'+dots+
+    '<button class="swatch-reset" onclick="applyBg('')">重置</button></div>';
+}
+(function(){try{applyBg(localStorage.getItem(BG_KEY));}catch(e){}})();
+function esc(s){var d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
+function h(html){document.getElementById('app').innerHTML=html;}
+function err(m){var e=document.getElementById('msg');if(e){e.textContent=m||'';}}
+async function api(path,body){
+  var r=await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:body?JSON.stringify(body):undefined});
+  var j=await r.json().catch(function(){return{ok:false,error:'响应解析失败'};});
+  if(!r.ok&&!j.error){j.error='HTTP '+r.status;}
+  return j;
+}
+async function refresh(){
+  var r=await fetch(base+'/api/user/me');
+  if(r.status===401){renderAuth(false);return;}
+  var u=await r.json();
+  renderHome(u);
+}
+function renderAuth(showRegister){
+  h('<h2>__SITE__ 用户面板</h2><p class="sub">'+(showRegister?'注册或登录以获取 API Key':'登录以管理你的 API Key 与额度')+'</p>'+
+    '<label>用户名</label><input id="u"><label>密码</label><input id="p" type="password">'+
+    '<div class="err" id="msg"></div>'+
+    '<div class="row"><button onclick="doLogin()">登录</button>'+
+    (showRegister?'<button class="ghost" onclick="doRegister()">注册</button>':'')+'</div>'+
+    '<h3>API 接入</h3><p class="sub">Base URL：本页地址（/panel 前的部分）<br>端点：/v1/chat/completions 或 /v1/messages</p>');
+  window.__reg=showRegister;
+  document.getElementById('p').onkeydown=function(ev){if(ev.key==='Enter'){showRegister?doRegister():doLogin();}};
+}
+async function doLogin(){err('');var j=await api('/api/auth/login',{u:document.getElementById('u').value.trim(),p:document.getElementById('p').value});
+  if(!j.ok){err(j.error);if(j.error&&(j.error.indexOf('不存在')>=0)&&window.__reg){err(j.error+'（可切换注册）');}return;}
+  refresh();}
+async function doRegister(){err('');var j=await api('/api/auth/register',{username:document.getElementById('u').value.trim(),password:document.getElementById('p').value});
+  if(!j.ok){err(j.error);return;}
+  renderHome({username:j.username,quota:j.quota,used:0,api_key_hint:'…'+j.token.slice(-4),unlimited:false});
+  showKey(j.token);}
+function fmtNum(n){n=Number(n)||0;if(n>=1e6)return (n/1e6).toFixed(1)+'M';
+  if(n>=1e3)return (n/1e3).toFixed(1)+'k';return String(n);}
+function usageBlock(u){
+  var s=u.usage||{};
+  if(!s.requests){return '<h3>用量</h3><p class="sub">还没有请求记录。</p>';}
+  var hit=Number(s.cache_hit_rate||0);
+  return '<h3>用量（最近 '+s.requests+' 次）</h3><div class="metrics">'+
+    '<div class="metric"><div class="k">输入 tokens</div><div class="v">'+fmtNum(s.tokens_in)+'</div></div>'+
+    '<div class="metric"><div class="k">输出 tokens</div><div class="v">'+fmtNum(s.tokens_out)+'</div></div>'+
+    '<div class="metric"><div class="k">缓存命中</div><div class="v">'+fmtNum(s.cache_read)+
+      '<small>'+hit+'%</small></div></div>'+
+    '<div class="metric"><div class="k">花费</div><div class="v">'+(s.cost||0)+' 点</div></div>'+
+    '</div>';
+}
 function renderHome(u){
   h('<h2>'+esc(u.username)+'</h2><p class="sub">'+(u.unlimited?'管理员（不限量）':'按量计费 · 分组 '+esc(u.group))+'</p>'+
     '<dl><dt>剩余额度</dt><dd>'+(u.unlimited?'∞':u.quota+' 点')+'</dd>'+
@@ -856,6 +981,8 @@ function renderHome(u){
     '<h3>兑换码</h3><input id="code" placeholder="rhx-…"><div class="ok-msg" id="msg"></div>'+
     '<button onclick="doRedeem()">兑换</button>'+
     '<h3>API Key</h3><button class="ghost" onclick="doRotate()">重置 Key（旧 Key 立即失效）</button>'+
+    bgBlock()+
+    usageBlock(u)+
     panelExtras(u)+
     '<div class="row" style="margin-top:14px"><button class="ghost" onclick="logout()">退出登录</button></div>');
 }
@@ -1062,30 +1189,102 @@ class RelayHandler(BaseHTTPRequestHandler):
             # 旧签名路由器（测试桩/第三方）：退回全量清单
             return list(self.router.models())
 
-    def _panel_recent(self, user: Any) -> list[dict[str, Any]]:
-        """本人最近消费明细：按名下令牌名过滤请求日志，最多 15 条。"""
+    def usage_for(self, identity: Any) -> dict[str, Any]:
+        """调用方自己的余额与用量（按令牌归集）。
+
+        只读**自己**的账：令牌名过滤请求日志，用户信息按令牌绑定的 user_id 取。
+        master 令牌没有 user 记录时，余额字段给 0 且 `unlimited=false`，
+        不假装有额度。
+        """
+        # master 令牌没有名字，但请求日志里就写作 "master"——用同一口径，
+        # 否则 master 调 /v1/usage 永远是 0，看起来像"没有用量"。
+        token_name = str(getattr(identity, "name", "") or "")
+        if not token_name:
+            # master 走的是 api_key，identity 可能是 None——请求日志里仍记作
+            # "master"，这里必须用同一口径，否则 master 查用量永远是 0。
+            token_name = "master"
+        user = None
+        user_id = str(getattr(identity, "user_id", "") or "")
+        if user_id and self.users is not None:
+            user = self.users.pool.get(user_id)
+
+        entries: list[dict[str, Any]] = []
+        if self.request_log and token_name:
+            try:
+                entries = [
+                    e for e in reqlog.tail(Path(self.request_log), limit=500)
+                    if e.get("token") == token_name
+                ]
+            except Exception:  # noqa: BLE001 - 报表读失败不该让 /v1/usage 500
+                entries = []
+        tokens_in = sum(int(e.get("tokens_in") or 0) for e in entries)
+        cache_read = sum(int(e.get("cache_read") or 0) for e in entries)
+        quota = int(getattr(user, "quota", 0) or 0) if user else 0
+        return {
+            "ok": True,
+            "token": token_name,
+            "username": str(getattr(user, "username", "") or token_name),
+            "role": str(getattr(user, "role", "user")) if user else "user",
+            "quota": quota,
+            "used": int(getattr(user, "used", 0) or 0) if user else 0,
+            "unlimited": quota < 0,
+            "requests": len(entries),
+            "tokens_in": tokens_in,
+            "tokens_out": sum(int(e.get("tokens_out") or 0) for e in entries),
+            "cache_read": cache_read,
+            "cache_hit_rate": round(cache_read / tokens_in * 100, 1) if tokens_in else 0.0,
+            "cost": sum(int(e.get("cost") or 0) for e in entries),
+        }
+    def _panel_recent(
+        self, user: Any
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """本人最近消费明细 + 用量汇总。
+
+        汇总里必须带 **cache_read**：用户最想知道的就是「我的缓存命中了多少、
+        一共花了多少钱」。早先这里只给 tokens/cost，面板就永远显示不出命中率——
+        而后端其实早就记下了这个数（reqlog 里有 cache_read），只是没往外送。
+
+        明细取**最新** 15 条：`tail()` 返回的是按时间正序的窗口，取前 15 条
+        其实取到了窗口里最老的那批，方向反了。
+        """
+        empty = {"requests": 0, "tokens_in": 0, "tokens_out": 0,
+                 "cache_read": 0, "cost": 0, "cache_hit_rate": 0.0}
         names = {
             t.name
             for t in (self.tokens.pool.tokens if self.tokens else [])
             if t.user_id == user.user_id
         }
         if not names or not self.request_log:
-            return []
+            return [], empty
         try:
-            entries = reqlog.tail(Path(self.request_log), limit=200)
+            entries = reqlog.tail(Path(self.request_log), limit=500)
         except Exception:
-            return []
-        out: list[dict[str, Any]] = []
-        for e in entries:
-            if e.get("token") in names:
-                out.append({
-                    "ts": e.get("ts"), "model": e.get("model"),
-                    "ok": e.get("ok"), "tokens_in": e.get("tokens_in"),
-                    "tokens_out": e.get("tokens_out"), "cost": e.get("cost") or 0,
-                })
-            if len(out) >= 15:
-                break
-        return out
+            return [], empty
+
+        mine = [e for e in entries if e.get("token") in names]
+        recent = [
+            {
+                "ts": e.get("ts"), "model": e.get("model"), "ok": e.get("ok"),
+                "tokens_in": e.get("tokens_in"), "tokens_out": e.get("tokens_out"),
+                "cache_read": e.get("cache_read") or 0,
+                "cost": e.get("cost") or 0,
+                "stream": bool(e.get("stream")),
+            }
+            for e in mine[-15:][::-1]          # 最新在前
+        ]
+        tokens_in = sum(int(e.get("tokens_in") or 0) for e in mine)
+        cache_read = sum(int(e.get("cache_read") or 0) for e in mine)
+        usage = {
+            "requests": len(mine),
+            "tokens_in": tokens_in,
+            "tokens_out": sum(int(e.get("tokens_out") or 0) for e in mine),
+            "cache_read": cache_read,
+            "cost": sum(int(e.get("cost") or 0) for e in mine),
+            # 命中率按输入 token 计：cache_read / tokens_in。tokens_in 为 0 时给 0，
+            # 不返回 None——前端不必再做空值分支。
+            "cache_hit_rate": round(cache_read / tokens_in * 100, 1) if tokens_in else 0.0,
+        }
+        return recent, usage
 
     def _handle_panel_api(self, path: str) -> None:
         """用户面板 API。/api/auth/* 无需会话；/api/user/* 需要会话。"""
@@ -1150,6 +1349,19 @@ class RelayHandler(BaseHTTPRequestHandler):
             user = self._session_user()
             if user is None:
                 self._send_json(401, {"ok": False, "error": "请先登录"})
+                return
+            required = {
+                "/api/user/rotate-key": "panel.key",
+                "/api/user/redeem": "panel.redeem",
+            }.get(path, "panel.view")
+            if not user_can(user, required):
+                self._send_json(
+                    403,
+                    {"ok": False,
+                     "error": "当前账号无权使用网页面板（接入方式为 API 直连）"
+                     if str(getattr(user, "channel", "web")) == "api"
+                     else "当前账号无权执行该操作"},
+                )
                 return
             if path == "/api/user/rotate-key":
                 api_key = self._issue_user_api_key(user)
@@ -1334,7 +1546,12 @@ class RelayHandler(BaseHTTPRequestHandler):
     # -- 基础设施 --------------------------------------------------------
     # _send_json 在会话区定义（带 Set-Cookie 支持），这里不重复定义。
 
+    def _site_name(self) -> str:
+        """当前站点名（用户面板/落地页标题用），随 site.json 改动即时生效。"""
+        return site_module.load_site(paths.site_path()).name
+
     def _send_html(self, html: str) -> None:
+        html = site_module.render(html, self._site_name())
         raw = html.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1772,10 +1989,10 @@ class RelayHandler(BaseHTTPRequestHandler):
             # 刻意不含模型清单与任何凭证线索——那些都在鉴权之后。
             self._send_html(
                 "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
-                "<title>relay-hub</title></head>"
+                "<title>__SITE__</title></head>"
                 "<body style=\"font-family:sans-serif;max-width:640px;margin:60px auto;"
                 "color:#333;line-height:1.7\">"
-                "<h2>relay-hub 中转站在线</h2>"
+                "<h2>__SITE__ 中转站在线</h2>"
                 "<p>这是一个 OpenAI / Anthropic 兼容的 API 网关。</p>"
                 "<p><a href=\"/panel\">用户面板</a>（登录/注册/兑换额度/API Key）</p>"
                 "<p>可用端点（均需凭证）：</p>"
@@ -1861,7 +2078,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                         if t.user_id == user.user_id
                     ],
                     "models": self._panel_models(user),
-                    "recent": self._panel_recent(user),
+                    **dict(zip(("recent", "usage"), self._panel_recent(user))),
                 },
             )
             return
@@ -1911,6 +2128,58 @@ class RelayHandler(BaseHTTPRequestHandler):
                     ),
                 },
             )
+            return
+        if path in (
+            "/v1/dashboard/billing/subscription",
+            "/v1/dashboard/billing/usage",
+        ):
+            # 本站也提供 new-api 风格的余额/用量查询；默认关闭，管理面开关控制。
+            if not features_module.billing_enabled(paths.features_path()):
+                self._error(
+                    404, "billing API 未开放（管理面「账单」页可开启）", "not_found_error"
+                )
+                return
+            authorized, identity = self._authenticate()
+            if not authorized:
+                return
+            info = self.usage_for(identity)
+            unlimited = bool(info.get("unlimited"))
+            quota = int(info.get("quota") or 0)
+            used = float(info.get("used") or 0)
+            expires = int(getattr(identity, "expires_at", 0) or 0)
+            if path.endswith("/subscription"):
+                hard = -1.0 if unlimited else float(quota)
+                self._send_json(
+                    200,
+                    {
+                        "object": "billing_subscription",
+                        "hard_limit_usd": hard,
+                        "soft_limit_usd": hard,
+                        "access_until": expires,
+                        "display_type": "points",
+                        "unlimited": unlimited,
+                        "quota": quota,
+                        "used": used,
+                    },
+                )
+            else:
+                self._send_json(
+                    200,
+                    {
+                        "object": "list",
+                        "total_usage": int(round(used * 100)),
+                        "display_type": "points",
+                        "used": used,
+                        "quota": quota,
+                        "unlimited": unlimited,
+                    },
+                )
+            return
+        if path == "/v1/usage":
+            authorized, identity = self._authenticate()
+            if not authorized:
+                return
+            self._send_json(200, self.usage_for(identity))
             return
         if path != "/v1/models":
             self._error(404, f"未知路径 {self.path}", "not_found_error")
@@ -2088,6 +2357,12 @@ class RelayHandler(BaseHTTPRequestHandler):
                 )
             )
         )
+        # 角色加成：VIP 用户的令牌也进优先队列（与 policy 里的设备/IP 优先并列）。
+        # 走权限矩阵而不是直接判 role ——「谁能插队」只在一处定义。
+        if not gate_priority and identity is not None and identity.user_id and self.users:
+            owner = self.users.pool.get(identity.user_id)
+            if owner is not None and user_can(owner, "queue.priority"):
+                gate_priority = True
         body = self._read_json(dialect)
         if body is None:
             self._log_request(
@@ -2207,7 +2482,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 )
                 return
         try:
-            # 并发闸门：在飞满员时排队而不是硬拒（搜题场景体验），队满/超时才 429。
+            # 并发闸门：在飞满员时排队而不是硬拒（突发场景体验），队满/超时才 429。
             # 优先名单里的设备/IP 排 VIP 队，名额一释放先轮到他们。
             gate = self.conc_gate
             if gate is not None and not gate.acquire(priority=gate_priority):
@@ -2593,6 +2868,13 @@ class RelayHandler(BaseHTTPRequestHandler):
                 outcome = router.relay(
                     model, body, streaming, trace_headers=trace_headers, fp=fp,
                     group=(getattr(identity, "channel_group", "") or None),
+                    # 出口查重按「下游身份」分桶：一个用户反复发同一句
+                    # （"继续"/重试）不该占掉另一个用户的额度。
+                    guard_scope=(
+                        getattr(identity, "token_hash", "")
+                        or getattr(identity, "name", "")
+                        or "anonymous"
+                    ),
                 )
             except TypeError as exc:
                 # 第三方路由器（测试/扩展）可能还是旧签名：不认 trace 参数就退回旧调用
@@ -2927,10 +3209,10 @@ class RelayServer(ThreadingHTTPServer):
         self.test_router = TestRouter()
         self.rate_limiter = RateLimiter()
         # 单 IP 限流：防「一个出口 IP 上跑一堆设备刷请求」。与令牌 RPM 互补——
-        # 令牌限的是每台设备的凭证，IP 限的是共享出口（教室 NAT）整体频率。
+        # 令牌限的是每台设备的凭证，IP 限的是共享出口（NAT）整体频率。
         self.ip_limiter = RateLimiter()
         self.ip_rpm = max(0, ip_rpm)  # 0 = 关闭
-        # 并发闸门 + 排队：搜题场景突发并发时排队而非硬拒（见 ConcurrencyGate）。
+        # 并发闸门 + 排队：突发并发时排队而非硬拒（见 ConcurrencyGate）。
         self.conc_gate = (
             ConcurrencyGate(max_concurrency, queue_size, queue_wait)
             if max_concurrency > 0

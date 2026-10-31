@@ -207,7 +207,7 @@ def _cmd_serve(argv: list[str]) -> int:
         default=60,
         dest="ip_rpm",
         help="单 IP 每分钟请求上限（对 /v1 推理端点生效，鉴权前拦截；0=关闭）。"
-        "公网/教室 NAT 场景防单出口刷请求",
+        "公网/NAT 场景防单出口刷请求",
     )
     parser.add_argument(
         "--max-concurrency",
@@ -1728,6 +1728,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_serve(argv[1:])
     if argv and argv[0] == "admin":
         return admin_module.main(argv[1:])
+    if argv and argv[0] == "users":
+        from . import useradmin as useradmin_module
+
+        return useradmin_module.main(argv[1:])
     if argv and argv[0] == "pool":
         return _cmd_pool(argv[1:])
     if argv and argv[0] == "scan":

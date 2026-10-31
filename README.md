@@ -1,99 +1,151 @@
 # relay-hub · Self-hosted LLM Gateway / 自托管大模型中转站
 
-[![CI](https://github.com/bilibiliUID1480494301/relay-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/bilibiliUID1480494301/relay-hub/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+![CI](https://github.com/bilibiliUID1480494301/relay-hub/actions/workflows/ci.yml/badge.svg)
+
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+
+
+
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
 
-**English** | A self-hosted LLM gateway: unify many upstreams (official API keys,
-local inference servers, other relay stations) behind one OpenAI/Anthropic-compatible
-endpoint, with key-pool scheduling, downstream tokens, quota & usage accounting,
-tiered circuit breaking, and conformance probing. Deploy it where the users are —
-a laptop for yourself, the LAN for a classroom, the public internet for a team
-(behind any tunnel or reverse proxy: cloudflared / ngrok / frp / nginx / Caddy).
-Pure Python standard library — zero third-party runtime dependencies, no database,
-no Node.js.
+|                                                                                       |                                                                     |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| **English**                                                                           | A self-hosted LLM gateway: unify many upstreams (official API keys, |
+| local inference servers, other relay stations) behind one OpenAI/Anthropic-compatible |                                                                     |
+| endpoint, with key-pool scheduling, downstream tokens, quota & usage accounting,      |                                                                     |
+| tiered circuit breaking, and conformance probing. Deploy it where the users are —     |                                                                     |
+| a laptop for yourself, the LAN for a classroom, the public internet for a team        |                                                                     |
+| (behind any tunnel or reverse proxy: cloudflared / ngrok / frp / nginx / Caddy).      |                                                                     |
+| Pure Python standard library — zero third-party runtime dependencies, no database,    |                                                                     |
+| no Node.js.                                                                           |                                                                     |
 
-**中文** | 一个自托管的大模型网关/中转站：把多家上游（官方 API Key、本地推理服务、
-别家中转站）统一成一个 OpenAI/Anthropic 兼容入口，带号池调度、下游令牌、额度记账、
-分级熔断和一致性探测。部署半径跟着用户走——自己用放本机，教室/工作组放局域网，
-面向公网就挂一条隧道或反代（cloudflared / ngrok / frp / nginx / Caddy）直接上线。
-纯 Python 标准库实现：零第三方运行时依赖、不装数据库、不依赖 Node.js。
+|                                                               |                                          |
+| ------------------------------------------------------------- | ---------------------------------------- |
+| **中文**                                                        | 一个自托管的大模型网关/中转站：把多家上游（官方 API Key、本地推理服务、 |
+| 别家中转站）统一成一个 OpenAI/Anthropic 兼容入口，带号池调度、下游令牌、额度记账、            |                                          |
+| 分级熔断和一致性探测。部署半径跟着用户走——自己用放本机，工作组/小团队放局域网，                     |                                          |
+| 面向公网就挂一条隧道或反代（cloudflared / ngrok / frp / nginx / Caddy）直接上线。 |                                          |
+| 纯 Python 标准库实现：零第三方运行时依赖、不装数据库、不依赖 Node.js。                   |                                          |
 
 ## Features (English)
 
-- **Upstream key pool**: multi-channel round-robin / least-failure / credit-aware
-  scheduling; priority & weight (primary/backup); four-tier cooldown (quota /
+- **Upstream key pool**: multi-channel round-robin / least-failure / credit-aware  
+  scheduling; priority & weight (primary/backup); four-tier cooldown (quota /  
   rate-limit / 5xx / auth-failure); hot reload.
-- **Downstream tokens**: per-device tokens (one-api style) with model whitelist,
+- **Downstream tokens**: per-device tokens (one-api style) with model whitelist,  
   RPM/daily limits, usage accounting; plaintext shown once, SHA-256 at rest.
-- **Deploy anywhere the users are**: `hubrelay serve` binds loopback by default;
-  `--host` opens it to the LAN; `--public` (0.0.0.0) refuses to start without
-  credentials. Internet-facing deployments put any tunnel or reverse proxy in
-  front (cloudflared / ngrok / frp / nginx / Caddy) — same station, same tokens,
+- **Deploy anywhere the users are**: `hubrelay serve` binds loopback by default;  
+  `--host` opens it to the LAN; `--public` (0.0.0.0) refuses to start without  
+  credentials. Internet-facing deployments put any tunnel or reverse proxy in  
+  front (cloudflared / ngrok / frp / nginx / Caddy) — same station, same tokens,  
   from a laptop to a VPS.
-- **Python SDK & one-line station**: `pip install hubrelay`, then
-  `st, url = hubrelay.quickstart("http://127.0.0.1:11434")` — or the full
-  `Station` API. On the client side, `StationClient` speaks
-  models/messages/MCP/A2A with an optional E2E envelope — both sides pure
+- **Python SDK & one-line station**: `pip install hubrelay`, then  
+  `st, url = hubrelay.quickstart("http://127.0.0.1:11434")` — or the full  
+  `Station` API. On the client side, `StationClient` speaks  
+  models/messages/MCP/A2A with an optional E2E envelope — both sides pure  
   stdlib, both importable from the package root.
-- **Dual protocol + embeddings**: `POST /v1/messages` (Anthropic),
-  `POST /v1/chat/completions` and `POST /v1/embeddings` (OpenAI) behind the same
-  credential — RAG / text tools work out of the box.
-- **Pairing**: out-of-band pairing codes (single-use, expiring) + optional LAN
+- **Protocols + embeddings**: `POST /v1/messages` (Anthropic),  
+  `POST /v1/chat/completions`, `POST /v1/responses` (OpenAI Responses) and  
+  `POST /v1/embeddings` behind the same credential — RAG / text tools and  
+  newer agent clients work out of the box.
+- **Pairing**: out-of-band pairing codes (single-use, expiring) + optional LAN  
   zero-input pairing.
-- **TOIP dynamic-password onboarding**: a plugin joins with *just a URL + a
-  rolling 6-digit code* (RFC 6238 TOTP) — no `pair begin`, no ticket to beg for.
-  `/v1/toip/join` returns the session token, the exact `baseURL` to write, and
-  the selectable model list in one call. LAN discovery (UDP v2 probe) already
-  carries the TOIP capability, so a client can find the station and its join
+- **TOIP dynamic-password onboarding**: a plugin joins with *just a URL + a  
+  rolling 6-digit code* (RFC 6238 TOTP) — no `pair begin`, no ticket to beg for.  
+  `/v1/toip/join` returns the session token, the exact `baseURL` to write, and  
+  the selectable model list in one call. LAN discovery (UDP v2 probe) already  
+  carries the TOIP capability, so a client can find the station and its join  
   endpoint from a single broadcast.
-- **Per-plugin log accounting**: each plugin gets its own log directory
-  (`pluginlogs/<plugin_id>/`), written alongside — not instead of — the global
-  request log. `X-DSH-Plugin-Id` tags the traffic; a TOIP-issued token is
+- **Per-plugin log accounting**: each plugin gets its own log directory  
+  (`pluginlogs/<plugin_id>/`), written alongside — not instead of — the global  
+  request log. `X-DSH-Plugin-Id` tags the traffic; a TOIP-issued token is  
   already bound to a plugin, so tagging works even without the header.
-- **Admin console**: local web UI for channels / tokens / policies / request log /
-  usage / audit / **plugins** / **dynamic password** — with an EN/中文 toggle in
+- **Admin console**: local web UI for channels / tokens / policies / request log /  
+  usage / audit / **plugins** / **dynamic password** — with an EN/中文 toggle in  
   the header.
+- **Identity & permissions**: three roles (user / VIP / admin) crossed with an  
+  access channel (web panel / API-only), resolved by one declarative permission  
+  matrix — "who may see and change what" is defined in a single place, not  
+  scattered across endpoints. Admins can sign in with **personal accounts**, so  
+  audit entries say *who* changed something instead of "an admin".
+- **Billing & quotas**: per-token accounting with point quotas and redeem codes.  
+  The self-service panel shows input/output tokens, **cache-hit rate** and spend;  
+  `GET /v1/usage` (token-authenticated) returns the caller's own numbers — a  
+  non-admin sees only their own bill.
+- **OpenAI-compatible billing API (opt-in)**: with `billing_enabled` on, clients  
+  call `GET /v1/dashboard/billing/subscription` and `/usage` and get their own  
+  numbers (`total_usage` in cents, `display_type: points`). Admins can also probe  
+  an **upstream new-api** station for real balance, group ratios and per-request  
+  cost from the 「账单」 tab — keys are never persisted.
+- **Model capability advertisement**: `/v1/models` reports each model's context  
+  window, max output, image support and reasoning-effort levels — merged  
+  conservatively when several channels serve the same model (narrowest limit  
+  wins). Clients align themselves instead of running on defaults.
+- **Channel affinity**: a conversation sticks to the upstream channel that  
+  served it (within the same priority tier), so upstream prompt caches stay  
+  warm instead of being scattered by round-robin.
+- **Charts**: the usage page plots daily cost, daily cache-hit rate and cost  
+  share by model — inline SVG, no third-party chart library.
 - **Conformance probe**: run compliance probes against any compatible gateway.
 - **Request audit**: control-plane audit log and (redacted) request details.
 
 ## 功能 Features（中文）
 
-- **上游号池** Upstream key pool：多渠道轮询/最少失败/额度感知调度，优先级与权重，
+- **上游号池** Upstream key pool：多渠道轮询/最少失败/额度感知调度，优先级与权重，  
   四档分级冷却（额度耗尽 / 限流 / 5xx / 鉴权失效），热加载。
-- **下游令牌** Downstream tokens：per-device 令牌（对标 one-api 的「令牌」），模型白名单、
+- **下游令牌** Downstream tokens：per-device 令牌（对标 one-api 的「令牌」），模型白名单、  
   RPM/每日限额、用量记账，明文只在发放时出现一次。
-- **部署半径跟着用户走**：`hubrelay serve` 默认只绑本机回环；`--host` 开到局域网；
-  `--public`（0.0.0.0）没有凭证拒绝启动。要上公网就在前面挂一条隧道或反代
-  （cloudflared / ngrok / frp / nginx / Caddy）——同一座站、同一套令牌，
+- **部署半径跟着用户走**：`hubrelay serve` 默认只绑本机回环；`--host` 开到局域网；  
+  `--public`（0.0.0.0）没有凭证拒绝启动。要上公网就在前面挂一条隧道或反代  
+  （cloudflared / ngrok / frp / nginx / Caddy）——同一座站、同一套令牌，  
   从笔记本到 VPS。
-- **Python SDK 与一行建站**：`pip install hubrelay` 后
-  `st, url = hubrelay.quickstart("http://127.0.0.1:11434")` 即起站；客户端侧
-  `StationClient` 打模型/MCP/A2A，可选 E2E 信封——两侧都是纯标准库，
+- **Python SDK 与一行建站**：`pip install hubrelay` 后  
+  `st, url = hubrelay.quickstart("http://127.0.0.1:11434")` 即起站；客户端侧  
+  `StationClient` 打模型/MCP/A2A，可选 E2E 信封——两侧都是纯标准库，  
   都从包根直接导入。
-- **多协议入口** Multi-protocol：`POST /v1/messages`（Anthropic）、
-  `POST /v1/chat/completions`、`POST /v1/embeddings`、`POST /v1/responses`
+- **多协议入口** Multi-protocol：`POST /v1/messages`（Anthropic）、  
+  `POST /v1/chat/completions`、`POST /v1/embeddings`、`POST /v1/responses`  
   （OpenAI，含流式；新版 IDE/Agent 客户端开箱即用），同一令牌多种鉴权头都认。
 - **配对发放** Pairing：带外配对码（成功即焚、限次）+ 可选的局域网免码配对。
-- **TOIP 动态口令接入**：插件只要「一个网址 + 一枚滚动 6 位口令」（RFC 6238 TOTP）
-  就能接入——不需要管理员先 `pair begin`，也不需要找人要配对码。
-  `POST /v1/toip/join` 一次调用就回齐会话令牌、要写进客户端的 `baseURL`
-  和可选模型清单。局域网发现（UDP v2 探测包）直接带上 TOIP 能力块，
+- **TOIP 动态口令接入**：插件只要「一个网址 + 一枚滚动 6 位口令」（RFC 6238 TOTP）  
+  就能接入——不需要管理员先 `pair begin`，也不需要找人要配对码。  
+  `POST /v1/toip/join` 一次调用就回齐会话令牌、要写进客户端的 `baseURL`  
+  和可选模型清单。局域网发现（UDP v2 探测包）直接带上 TOIP 能力块，  
   客户端一次广播就能拿到站点地址与接入入口。
-- **按插件分账的插件日志**：每个插件一个目录（`pluginlogs/<插件 id>/`），
-  与全局请求明细**并行**写而不是取代它。`X-DSH-Plugin-Id` 头是分账标签；
+- **按插件分账的插件日志**：每个插件一个目录（`pluginlogs/<插件 id>/`），  
+  与全局请求明细**并行**写而不是取代它。`X-DSH-Plugin-Id` 头是分账标签；  
   TOIP 发出的令牌本身就绑定了插件，所以不带这个头也能分账。
 - **管理控制台** Admin console：本地网页，管理渠道/令牌/策略/请求明细/用量/审计/**插件**/**动态口令**。
+- **身份与权限**：user / VIP / admin 三档角色，叠加「接入方式」维度  
+  （网页面板 / 仅 API），由一张**声明式权限矩阵**统一决定"谁能看什么、改什么"，  
+  不散落在各个端点里。管理员可用**个人账号**登录管理台——审计里记的是"谁"，  
+  而不是"某管理员"。
+- **计费与额度**：按令牌记账、点数额度、兑换码。用户面板直接显示输入/输出  
+  tokens、**缓存命中率**与花费；`GET /v1/usage`（令牌认证）返回调用方自己的账，  
+  非管理员看到的也只有自己的。
+- **对账入口（两层）**：管理面「账单」页可查**上游 new-api** 站点的真实余额 / 分组倍率 /  
+  单次成本（仅管理员，密钥不落盘）；本站也可按开关开放 `/v1/dashboard/billing/*`  
+  （默认关闭，只返回调用者自己的账）。
+- **站点命名与功能开关**：管理面可改站点名（`site.json`，四个面板标题同步）、  
+  开关 billing 等对外接口（`features.json`，改完即时生效）。
+- **模型能力广播**：`/v1/models` 报每个模型的上下文窗口、最大输出、是否原生  
+  支持图片、推理档位——多渠道路由同一模型时按**最保守值**合并（数值取最小、  
+  图片取与、档位取交集），客户端**自动对齐**，不再拿默认值瞎猜。
+- **渠道亲和**：同一会话粘住同一条上游渠道（同优先级层内），上游 prompt  
+  cache 不被轮询打散——散了就是每轮冷启动 prefill，钱和时间都白花。
+- **图表**：用量页内置三张图——每日费用、每日缓存命中率、费用占比（按模型），  
+  纯内联 SVG，不引第三方图表库。
 - **一致性探测** Conformance probe：对着任意兼容网关跑合规探测，抓出不合规实现。
 - **请求审计** Request audit：控制面操作审计与请求明细（脱敏）。
 
 ## TOIP 动态口令接入 (English)
 
-**TOIP** (Time-based One-time password Ingestion Protocol) is the onboarding
-path built for *plugins* rather than for humans with a console. The older
-pairing flow is deliberately manual and single-use; that is the right shape for
-"a person adds a phone", and the wrong shape for "a plugin on ten machines
+**TOIP** (Time-based One-time password Ingestion Protocol) is the onboarding  
+path built for *plugins* rather than for humans with a console. The older  
+pairing flow is deliberately manual and single-use; that is the right shape for  
+"a person adds a phone", and the wrong shape for "a plugin on ten machines  
 rejoins after a reinstall".
 
 > Full wire specification (EN + 中文): [`docs/TOIP.md`](./docs/TOIP.md)
@@ -132,30 +184,31 @@ The response contains a `dsh` block ready for a DeepSeek Harness provider:
 }
 ```
 
-`baseURL` always ends in `/v1`: the DeepSeek Messages adapter only appends `/v1`
+`baseURL` always ends in `/v1`: the DeepSeek Messages adapter only appends `/v1`  
 when the path does **not** already end with it.
 
-| Endpoint | Auth | Purpose |
-|---|---|---|
-| `GET /v1/toip/station` | none | Capability advertisement. **Never** contains the seed, a code, or a token. `404` when TOIP is off. |
-| `POST /v1/toip/join` | code or ticket | Exchange a credential for a session token + onboarding payload. |
-| `POST /v1/toip/enroll` | ticket only | First-contact enrollment (a code alone will not enroll a new plugin). |
-| `GET /v1/toip/session` | token | Self-check: which plugin am I, when do I expire, how much have I used. |
+| Endpoint               | Auth           | Purpose                                                                                            |
+| ---------------------- | -------------- | -------------------------------------------------------------------------------------------------- |
+| `GET /v1/toip/station` | none           | Capability advertisement. **Never** contains the seed, a code, or a token. `404` when TOIP is off. |
+| `POST /v1/toip/join`   | code or ticket | Exchange a credential for a session token + onboarding payload.                                    |
+| `POST /v1/toip/enroll` | ticket only    | First-contact enrollment (a code alone will not enroll a new plugin).                              |
+| `GET /v1/toip/session` | token          | Self-check: which plugin am I, when do I expire, how much have I used.                             |
 
 Operational properties worth knowing:
 
-- **Rotating the station secret does not disturb live plugins.**
-  `hubrelay toip station --force` invalidates every *code* immediately, while
-  already-issued session tokens keep working. That is the whole point of
+- **Rotating the station secret does not disturb live plugins.**  
+  `hubrelay toip station --force` invalidates every *code* immediately, while  
+  already-issued session tokens keep working. That is the whole point of  
   choosing a rotatable shared secret over a one-shot pairing code.
-- **Joining is idempotent per device.** A code-based rejoin revokes the previous
-  session token and issues a new one — plaintext tokens are only stored as
+- **Joining is idempotent per device.** A code-based rejoin revokes the previous  
+  session token and issues a new one — plaintext tokens are only stored as  
   SHA-256, so "issue it again" is the only honest way to hand one out twice.
-- **Attempts are rate-limited per source IP** (8 per 5-minute window) and every
+- **Attempts are rate-limited per source IP** (8 per 5-minute window) and every  
   rejection is written to the audit log as `toip.reject`.
-- **The code lives 30 seconds** with ±1 window of clock-drift tolerance. A
-  gateway and client whose clocks differ by more than 30 s will fail; the error
+- **The code lives 30 seconds** with ±1 window of clock-drift tolerance. A  
+  gateway and client whose clocks differ by more than 30 s will fail; the error  
   message says so explicitly rather than blaming the key.
+
 
 ### Per-plugin logs
 
@@ -398,6 +451,7 @@ python -m relayhub.gateway serve --pool pool.json --api-key rh_master
 # 3)（可选）本地网页控制台
 python -m relayhub.gateway admin
 ```
+
 
 更多子命令（`token` / `clients` / `pair` / `toip` / `audit` / `check` / `scan` / `requests` /
 `usage`）见各自主命令的 `--help`。
@@ -665,6 +719,7 @@ Or from Python: `hubrelay.doctor(port=8799)` → list of `{name, ok, detail, fix
 | [docs/API.md](docs/API.md) | Python API 完整函数列表（建站 / 客户端 / E2E / 渠道池 / 令牌 / 用户与额度） |
 | [docs/ADMIN.md](docs/ADMIN.md) | 管理面使用与页面自定义（CSS 主题令牌、TOTP 动态管理密码、管理面 API 一览） |
 | [docs/PRICING.md](docs/PRICING.md) | 计费规则（标价 / 分组倍率 / 分时峰谷 / 上游成本倍率 / 利润报表 / 渠道分组 / 兑换码） |
+| [docs/BILLING.md](docs/BILLING.md) | 账单：本站 billing 接口（可开关）+ 上游 new-api 余额/倍率/单次成本口径 |
 | [docs/CLIENT-SDK.md](docs/CLIENT-SDK.md) | 客户端 SDK 接入指南 |
 | [docs/E2E-ENCRYPTION.md](docs/E2E-ENCRYPTION.md) | 端到端加密说明 |
 | [docs/TOIP.md](docs/TOIP.md) | TOIP 线协议规范（中英对照） |

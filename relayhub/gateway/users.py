@@ -24,6 +24,8 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .atomicio import write_json_atomic
+
 PBKDF2_ITERATIONS = 100_000
 # 这些字段是运行时状态，不参与指纹（quota 每请求都可能变，指纹变了就是每请求重载）
 _RUNTIME_ONLY_FIELDS = ("used",)
@@ -52,12 +54,63 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
+# 角色三档。**vip 不是"半个 admin"**：它只是额度与队列上的优待，
+# 权限面与普通用户一致——把"多给资源"和"多给权力"分开，越权面才不会悄悄变大。
+ROLES = ("user", "vip", "admin")
+# 接入维度（与角色正交）：web = 用网页面板；api = 只走程序调用，不发面板会话。
+# 两者可同属一个角色——"管理员又分 API 直连和其他"说的就是这个维度，不是第四种角色。
+CHANNELS = ("web", "api")
+
+# 权限矩阵：角色 × 能力。声明式放在一处，页面、API、插件都从这里取，
+# 避免"某个端点忘了判角色"这类越权洞散落在各处 if 里。
+CAPABILITIES: dict[str, frozenset[str]] = {
+    "user": frozenset({"panel.view", "panel.key", "panel.redeem", "api.call"}),
+    "vip": frozenset({
+        "panel.view", "panel.key", "panel.redeem", "api.call",
+        "queue.priority",           # 并发闸门里的 VIP 队
+    }),
+    "admin": frozenset({"*"}),
+}
+
+
+def normalize_role(value: object) -> str:
+    """非法/缺失的 role 一律回落 user——**绝不回落 admin**。"""
+    role = str(value or "").strip().lower()
+    return role if role in ROLES else "user"
+
+
+def normalize_channel(value: object) -> str:
+    ch = str(value or "").strip().lower()
+    return ch if ch in CHANNELS else "web"
+
+
+def can(user: "User | str | None", capability: str) -> bool:
+    """某个用户（或角色名）是否具备某项能力。
+
+    channel=api 的用户没有面板能力：他们不该能登网页，但照样能调 API。
+    """
+    if user is None:
+        return False
+    if isinstance(user, str):
+        role, channel = normalize_role(user), "web"
+    else:
+        role, channel = normalize_role(user.role), normalize_channel(user.channel)
+        if not user.enabled:
+            return False
+    if role != "admin" and channel == "api" and capability.startswith("panel."):
+        return False
+    caps = CAPABILITIES.get(role, CAPABILITIES["user"])
+    return "*" in caps or capability in caps
+
+
 @dataclass
 class User:
     user_id: str
     username: str
     password_hash: str
-    role: str = "user"  # admin | user
+    role: str = "user"   # user | vip | admin
+    # web = 可登面板；api = 只走程序调用（面板能力被 can() 挡掉）
+    channel: str = "web"
     enabled: bool = True
     # 剩余额度（点）。0 = 用尽；-1 = 不限量（管理员自己）
     quota: int = 0
@@ -76,7 +129,8 @@ class User:
             user_id=str(raw.get("user_id") or uuid.uuid4()),
             username=str(raw.get("username") or ""),
             password_hash=str(raw.get("password_hash") or ""),
-            role=str(raw.get("role") or "user"),
+            role=normalize_role(raw.get("role")),
+            channel=normalize_channel(raw.get("channel")),
             enabled=bool(raw.get("enabled", True)),
             quota=int(raw.get("quota", 0) or 0),
             used=int(raw.get("used", 0) or 0),
@@ -166,7 +220,7 @@ class UserPool:
             "peak_multiplier": self.peak_multiplier,
             "users": [u.to_dict() for u in self.users],
         }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json_atomic(path, payload)
 
     # -- 查询 ------------------------------------------------------------
 
@@ -386,10 +440,9 @@ class RedeemStore:
         return [RedeemCode.from_dict(i) for i in json.loads(self.path.read_text(encoding="utf-8")).get("codes", [])]
 
     def _save(self, codes: list[RedeemCode]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps({"schemaVersion": 1, "codes": [c.to_dict() for c in codes]}, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        write_json_atomic(
+            self.path,
+            {"schemaVersion": 1, "codes": [c.to_dict() for c in codes]},
         )
 
     def generate(self, count: int, credits: int, *, prefix: str = "rhx") -> list[RedeemCode]:

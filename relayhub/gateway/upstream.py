@@ -8,7 +8,9 @@
 
 支持：Anthropic ⇄ OpenAI 的 `tools` / `tool_use` / `tool_calls` 互译（参考 OneAPI
 `relay-convert.go` 的 Inbound→IR→Outbound 思路：网关内部只认 Anthropic 一种 IR，
-出站/入站各做一次协议适配）。多模态块仍然显式报 400，避免半对翻译把问题藏到难排查处。
+出站/入站各做一次协议适配）。图片块双向互译（base64 / url 两种 source 都认），
+`tool_result` 内嵌的图在 OpenAI 侧翻成 `image_url` parts；认不出的形状才显式报错，
+绝不让它静默缺席。
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from http.client import HTTPConnection, HTTPSConnection
+from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
@@ -65,11 +68,42 @@ class UpstreamReply:
     cache_creation: int = 0
 
 
+_TRACE_PATH: Path | None = None
+
+
+def set_trace_usage(path: Path | None) -> None:
+    """开关「上游 usage 原样记录」。只记 usage 元数据，**不含任何请求/应答内容**。
+
+    为什么需要：缓存命中一直记 0 时，分不清是「上游根本没缓存」还是
+    「我们没认它返回的字段」。开这个开关跑一次真实请求，答案立刻清楚。
+    """
+    global _TRACE_PATH
+    _TRACE_PATH = path
+
+
+def _trace_usage(usage: dict[str, Any], where: str) -> None:
+    if _TRACE_PATH is None or not usage:
+        return
+    try:
+        with open(_TRACE_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"where": where, "usage": usage}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def cache_from_usage(usage: dict[str, Any]) -> tuple[int, int]:
-    """从 usage 提取缓存命中量。Anthropic 有原生字段；
-    OpenAI 的 cached_tokens 藏在 prompt_tokens_details 里，折进 read 侧。"""
+    """从 usage 提取缓存命中量。
+
+    三种口径都要认，否则会把「上游明明命中了」记成 0，缓存报表永远是假的：
+      * Anthropic 原生：`cache_read_input_tokens` / `cache_creation_input_tokens`
+      * DeepSeek 兼容：顶层 `prompt_cache_hit_tokens`（命中）
+      * OpenAI 兼容：`prompt_tokens_details.cached_tokens`
+    """
     read = int(usage.get("cache_read_input_tokens") or 0)
     creation = int(usage.get("cache_creation_input_tokens") or 0)
+    if not read:
+        # DeepSeek 风格：顶层字段，不是 prompt_tokens_details
+        read = int(usage.get("prompt_cache_hit_tokens") or 0)
     if not read:
         details = usage.get("prompt_tokens_details") or {}
         read = int(details.get("cached_tokens") or 0) if isinstance(details, dict) else 0
@@ -293,6 +327,39 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _tool_result_content(content: Any) -> Any:
+    """Anthropic tool_result 的 content → OpenAI tool 消息的 content。
+
+    纯文本保持字符串（绝大多数上游只认这个形状）；**带图片时升级为块数组**——
+    OpenAI 现行 API 的 tool 角色接受 text/image_url parts，截图类工具的结果图
+    由此能到模型眼前。此前这里一律 `_anthropic_text` 摊平，工具返回的图被
+    静默丢弃：不报错，只是模型永远看不到自己刚截的屏。
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return _anthropic_text(content)
+    text_parts: list[str] = []
+    image_parts: list[dict[str, Any]] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            text_parts.append(str(block.get("text") or ""))
+        elif block.get("type") == "image":
+            image = _anthropic_image_to_openai(block.get("source"))
+            if image is not None:
+                image_parts.append(image)
+    if not image_parts:
+        return "".join(text_parts)
+    out: list[dict[str, Any]] = []
+    text = "".join(text_parts)
+    if text.strip():
+        out.append({"type": "text", "text": text})
+    out.extend(image_parts)
+    return out
+
+
 def to_openai_request(payload: dict[str, Any]) -> dict[str, Any]:
     """Anthropic Messages 请求 → OpenAI Chat Completions 请求（含 tools/tool_use/tool_result 互译）。"""
     messages: list[dict[str, Any]] = []
@@ -338,7 +405,7 @@ def to_openai_request(payload: dict[str, Any]) -> dict[str, Any]:
                     {
                         "role": "tool",
                         "tool_call_id": tr.get("tool_use_id"),
-                        "content": _anthropic_text(tr.get("content")),
+                        "content": _tool_result_content(tr.get("content")),
                     }
                 )
         elif role == "assistant":
@@ -396,6 +463,24 @@ def to_openai_request(payload: dict[str, Any]) -> dict[str, Any]:
     ):
         if payload.get(source) is not None:
             out[target] = payload[source]
+
+    # ---- 推理档位：这一层以前是**静默丢弃**的 ----
+    # 客户端（dsh）在 Anthropic 方言下发 thinking.budget_tokens，在 OpenAI 方言下
+    # 发 reasoning_effort。上面那张白名单会把它们过滤掉，用户以为开了"深度思考"，
+    # 上游收到的却是普通请求——不报错，只是钱花了、答案没变深。
+    effort = payload.get("reasoning_effort")
+    if isinstance(effort, str) and effort.strip():
+        out["reasoning_effort"] = effort.strip().lower()
+    else:
+        thinking = payload.get("thinking")
+        if isinstance(thinking, dict) and str(thinking.get("type")) == "enabled":
+            budget = int(thinking.get("budget_tokens") or 0)
+            if budget >= 16000:
+                out["reasoning_effort"] = "high"
+            elif budget >= 4000:
+                out["reasoning_effort"] = "medium"
+            elif budget > 0:
+                out["reasoning_effort"] = "low"
     return out
 
 
@@ -415,7 +500,7 @@ def _flatten_openai_content(content: Any) -> str:
         elif kind in ("image_url", "input_image"):
             # 用户消息里的图片由 _openai_user_content_to_anthropic 走块翻译；
             # 走到这里的都是 system/assistant/tool 等纯文本语境，直接忽略图块
-            # （而不是像旧版那样 400 拒绝——搜题带图是正常用法）。
+            # （而不是像旧版那样 400 拒绝——带图是正常用法）。
             continue
         elif kind in ("audio", "input_audio"):
             raise UpstreamError(
@@ -427,7 +512,7 @@ def _flatten_openai_content(content: Any) -> str:
 def _openai_user_content_to_anthropic(content: Any) -> Any:
     """OpenAI 用户消息 content → Anthropic 形态（纯文本或 text+image 块数组）。
 
-    图片识别（搜题拍照）走这里：image_url 的 data URL 拆成 base64 source、
+    图片识别（拍照上传）走这里：image_url 的 data URL 拆成 base64 source、
     http(s) URL 转 Anthropic 的 url source；纯文本消息保持字符串不变。
     """
     if isinstance(content, str):
@@ -482,7 +567,24 @@ def to_anthropic_request(payload: dict[str, Any]) -> dict[str, Any]:
                 system_parts.append(text)
             continue
         if role == "tool":
-            # OpenAI 的 tool 角色 → Anthropic 的 tool_result 块（放在一条 user 消息里）
+            # OpenAI 的 tool 角色 → Anthropic 的 tool_result 块（放在一条 user 消息里）。
+            # content 可能是块数组（带 image_url）：与 _tool_result_content 对称，
+            # 截图类工具的结果图在 OpenAI 入站这条路上也不能被摊平丢失。
+            raw_content = message.get("content")
+            if isinstance(raw_content, list):
+                blocks: list[dict[str, Any]] = []
+                for part in raw_content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "text":
+                        blocks.append({"type": "text", "text": str(part.get("text") or "")})
+                    elif part.get("type") == "image_url":
+                        image = _openai_image_to_anthropic(part.get("image_url"))
+                        if image is not None:
+                            blocks.append(image)
+                tool_content: Any = blocks or ""
+            else:
+                tool_content = _flatten_openai_content(raw_content)
             messages.append(
                 {
                     "role": "user",
@@ -490,7 +592,7 @@ def to_anthropic_request(payload: dict[str, Any]) -> dict[str, Any]:
                         {
                             "type": "tool_result",
                             "tool_use_id": message.get("tool_call_id"),
-                            "content": _flatten_openai_content(message.get("content")),
+                            "content": tool_content,
                         }
                     ],
                 }
@@ -550,6 +652,12 @@ def to_anthropic_request(payload: dict[str, Any]) -> dict[str, Any]:
     stop = payload.get("stop")
     if stop:
         out["stop_sequences"] = [stop] if isinstance(stop, str) else list(stop)
+    # 推理档位：OpenAI 方言的 reasoning_effort 原样进 IR。IR 容忍该字段
+    # （见 to_openai_request 的档位映射注释），出站再决定怎么翻；
+    # 以前入站不带过去，OpenAI 客户端的档位在第一个转换点就被扔了。
+    effort = payload.get("reasoning_effort")
+    if isinstance(effort, str) and effort.strip():
+        out["reasoning_effort"] = effort.strip().lower()
     return out
 
 
@@ -635,6 +743,7 @@ def call_once(
 
     if anthropic_side:
         usage = data.get("usage") or {}
+        _trace_usage(usage, "json")
         cache_read, cache_creation = cache_from_usage(usage)
         return UpstreamReply(
             message=data,
@@ -644,6 +753,7 @@ def call_once(
             cache_creation=cache_creation,
         )
     message, tokens_in, tokens_out = to_anthropic_message(data, str(payload.get("model") or ""))
+    _trace_usage(data.get("usage") or {}, "json")
     cache_read, cache_creation = cache_from_usage(data.get("usage") or {})
     return UpstreamReply(
         message=message,
@@ -736,6 +846,7 @@ def _stream_anthropic(
 ) -> Iterator[tuple[str, dict[str, Any]]]:
     connection, url = _open(key, "/messages", timeout)
     tokens_in = tokens_out = 0
+    cache_read = cache_creation = 0
     try:
         body = json.dumps({**payload, "stream": True}, ensure_ascii=False).encode("utf-8")
         headers = _auth_headers(key, accept_sse=True, trace_headers=trace_headers)
@@ -765,8 +876,15 @@ def _stream_anthropic(
                         start_usage = (parsed.get("message") or {}).get("usage") or usage
                         tokens_in = int(start_usage.get("input_tokens") or 0)
                         tokens_out = int(start_usage.get("output_tokens") or 0)
+                        _trace_usage(start_usage, "stream-native")
+                        cache_read, cache_creation = cache_from_usage(start_usage)
                     elif name == "message_delta":
                         tokens_out = max(tokens_out, int(usage.get("output_tokens") or 0))
+                        if usage:
+                            _trace_usage(usage, "stream-native")
+                            _cr, _cc = cache_from_usage(usage)
+                            if _cr or _cc:
+                                cache_read, cache_creation = _cr, _cc
                     yield (name, parsed)
                 current_event, data_lines = None, []
                 continue
@@ -788,10 +906,23 @@ def _stream_anthropic(
     except (OSError, ssl.SSLError) as exc:
         connpool.mark_dead(connection)
         raise UpstreamError(0, f"连接上游失败：{exc}", retryable=True) from exc
-    # 流读完后连接归还池（响应体已消费尽，可安全复用）。
-    connpool.release(connection, reusable=True)
+    except UpstreamError:
+        # 流式出错时响应体通常只读了一半，连接**不能复用**——否则下一条请求
+        # 会撞 `CannotSendRequest: Request-sent`（线上 500 的真身）。宁可丢一条连接。
+        connpool.mark_dead(connection)
+        raise
+    except BaseException:
+        # 客户端断开 / 生成器被 close（GeneratorExit）：同样不能复用。
+        # 不接这一层的话，半读的连接既不复用也不关闭，等于泄漏一个 socket。
+        connpool.mark_dead(connection)
+        raise
+    # 流式连接**不复用**：SSE 遇到 [DONE] 就 break，HTTP 分块体没读完，
+    # 此时 __state 已是 Idle 但 response 未关闭，回池必被下一条请求撞
+    # `ResponseNotReady: Request-sent`。流式本身耗时长，复用省下的握手
+    # 占比极小，不值得冒这个风险。
+    connpool.mark_dead(connection)
     if on_usage:
-        on_usage(tokens_in, tokens_out)
+        on_usage(tokens_in, tokens_out, cache_read, cache_creation)
 
 
 def _stream_openai_as_anthropic(
@@ -804,6 +935,7 @@ def _stream_openai_as_anthropic(
     model = str(payload.get("model") or "")
     connection, url = _open(key, "/chat/completions", timeout)
     tokens_in = tokens_out = 0
+    cache_read = cache_creation = 0
     try:
         outbound = to_openai_request(payload)
         # 只有带上 include_usage 上游才会在流尾给 usage，拿不到就记 0，不瞎估。
@@ -852,8 +984,10 @@ def _stream_openai_as_anthropic(
                 continue
             usage = chunk.get("usage") or {}
             if usage:
+                _trace_usage(usage, "stream")
                 tokens_in = int(usage.get("prompt_tokens") or tokens_in)
                 tokens_out = int(usage.get("completion_tokens") or tokens_out)
+                cache_read, cache_creation = cache_from_usage(usage)
             for choice in chunk.get("choices") or []:
                 delta = choice.get("delta") or {}
                 piece = delta.get("content")
@@ -953,17 +1087,34 @@ def _stream_openai_as_anthropic(
                     "stop_reason": _FINISH_REASON_MAP.get(finish_reason, "end_turn"),
                     "stop_sequence": None,
                 },
-                "usage": {"output_tokens": tokens_out},
+                # 关键：把 input_tokens 一并带上。OpenAI 兼容上游的 usage 只在**流尾**
+                # 那个 chunk 里给（prompt_tokens/completion_tokens），而 message_start
+                # 早已发出、里面的 input_tokens 只能是 0。若这里不带，下游 openai_chunks
+                # 从 message_start 取 prompt_tokens 就永远是 0（实测 new-api 对照暴露）。
+                "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out},
             },
         )
         yield ("message_stop", {"type": "message_stop"})
     except (OSError, ssl.SSLError) as exc:
         connpool.mark_dead(connection)
         raise UpstreamError(0, f"连接上游失败：{exc}", retryable=True) from exc
-    # 流读完后连接归还池（响应体已消费尽，可安全复用）。
-    connpool.release(connection, reusable=True)
+    except UpstreamError:
+        # 流式出错时响应体通常只读了一半，连接**不能复用**——否则下一条请求
+        # 会撞 `CannotSendRequest: Request-sent`（线上 500 的真身）。宁可丢一条连接。
+        connpool.mark_dead(connection)
+        raise
+    except BaseException:
+        # 客户端断开 / 生成器被 close（GeneratorExit）：同样不能复用。
+        # 不接这一层的话，半读的连接既不复用也不关闭，等于泄漏一个 socket。
+        connpool.mark_dead(connection)
+        raise
+    # 流式连接**不复用**：SSE 遇到 [DONE] 就 break，HTTP 分块体没读完，
+    # 此时 __state 已是 Idle 但 response 未关闭，回池必被下一条请求撞
+    # `ResponseNotReady: Request-sent`。流式本身耗时长，复用省下的握手
+    # 占比极小，不值得冒这个风险。
+    connpool.mark_dead(connection)
     if on_usage:
-        on_usage(tokens_in, tokens_out)
+        on_usage(tokens_in, tokens_out, cache_read, cache_creation)
 
 
 def peek_first(events: Iterator[tuple[str, dict[str, Any]]]) -> tuple[tuple[str, dict[str, Any]], Iterator[tuple[str, dict[str, Any]]]]:
