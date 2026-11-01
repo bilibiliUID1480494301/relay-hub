@@ -94,6 +94,7 @@ LOGIN_HTML = """<!doctype html>
 </style></head><body>
 <form onsubmit="return doLogin()">
  <h1>__SITE__ 号池管理 · Key Pool Admin</h1>
+ <p style="margin:0 0 1rem;color:#9ca3af;font-size:.82rem">入站协议：OpenAI / Anthropic / Gemini · 上游协议：openai-chat / anthropic-messages / gemini-api</p>
  <label>管理面 token / Admin token</label>
  <input id="token" type="password" autofocus>
  <label>动态码 / TOTP（未启用留空）</label>

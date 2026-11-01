@@ -110,3 +110,36 @@ def test_stream_emits_anthropic_events(server: str) -> None:
     )
     assert text == "hello"
     assert Handler.seen[-1].endswith(":streamGenerateContent")
+
+
+def test_from_gemini_request_maps_text_system_tools_and_config():
+    payload = {
+        "systemInstruction": {"parts": [{"text": "be brief"}]},
+        "contents": [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"functionCall": {"name": "f", "args": {"a": 1}}}]},
+        ],
+        "tools": [{"functionDeclarations": [{"name": "f", "parameters": {"type": "object"}}]}],
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 128, "topP": 0.9},
+    }
+    body = gemini_api.from_gemini_request(payload, "gemini-2.0-flash", streaming=True)
+    assert body["model"] == "gemini-2.0-flash"
+    assert body["system"] == "be brief"
+    assert body["stream"] is True
+    assert body["max_tokens"] == 128
+    assert body["temperature"] == 0.3 and body["top_p"] == 0.9
+    assert body["messages"][0]["content"] == [{"type": "text", "text": "hi"}]
+    assert body["messages"][1]["content"][0]["type"] == "tool_use"
+    assert body["tools"][0]["name"] == "f"
+
+
+def test_to_gemini_response_and_chunks():
+    message = {
+        "content": [{"type": "text", "text": "ok"}],
+        "usage": {"input_tokens": 3, "output_tokens": 2},
+    }
+    out = gemini_api.to_gemini_response(message, "m")
+    assert out["candidates"][0]["content"]["parts"] == [{"text": "ok"}]
+    assert out["usageMetadata"]["totalTokenCount"] == 5
+    chunks = list(gemini_api.to_gemini_chunks([("content_block_delta", {"delta": {"type": "text_delta", "text": "hi"}})]))
+    assert chunks[0]["candidates"][0]["content"]["parts"][0]["text"] == "hi"

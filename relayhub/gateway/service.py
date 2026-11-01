@@ -35,6 +35,7 @@ from . import clients as clients_module
 from . import pluginlogs
 from . import reqlog
 from . import features as features_module
+from . import gemini_api
 from . import site as site_module
 from . import responses_api
 from . import toip as toip_module
@@ -893,7 +894,7 @@ function renderAuth(showRegister){
     '<div class="err" id="msg"></div>'+
     '<div class="row"><button onclick="doLogin()">登录</button>'+
     (showRegister?'<button class="ghost" onclick="doRegister()">注册</button>':'')+'</div>'+
-    '<h3>API 接入</h3><p class="sub">Base URL：本页地址（/panel 前的部分）<br>端点：/v1/chat/completions 或 /v1/messages</p>');
+    '<h3>API 接入</h3><p class="sub">Base URL：本页地址（/panel 前的部分）<br>端点：/v1/chat/completions、/v1/messages 或 /v1beta/models/{model}:generateContent</p>');
   window.__reg=showRegister;
   document.getElementById('p').onkeydown=function(ev){if(ev.key==='Enter'){showRegister?doRegister():doLogin();}};
 }
@@ -948,7 +949,7 @@ function renderAuth(showRegister){
     '<div class="err" id="msg"></div>'+
     '<div class="row"><button onclick="doLogin()">登录</button>'+
     (showRegister?'<button class="ghost" onclick="doRegister()">注册</button>':'')+'</div>'+
-    '<h3>API 接入</h3><p class="sub">Base URL：本页地址（/panel 前的部分）<br>端点：/v1/chat/completions 或 /v1/messages</p>');
+    '<h3>API 接入</h3><p class="sub">Base URL：本页地址（/panel 前的部分）<br>端点：/v1/chat/completions、/v1/messages 或 /v1beta/models/{model}:generateContent</p>');
   window.__reg=showRegister;
   document.getElementById('p').onkeydown=function(ev){if(ev.key==='Enter'){showRegister?doRegister():doLogin();}};
 }
@@ -1993,14 +1994,15 @@ class RelayHandler(BaseHTTPRequestHandler):
                 "<body style=\"font-family:sans-serif;max-width:640px;margin:60px auto;"
                 "color:#333;line-height:1.7\">"
                 "<h2>__SITE__ 中转站在线</h2>"
-                "<p>这是一个 OpenAI / Anthropic 兼容的 API 网关。</p>"
+                "<p>这是一个 OpenAI / Anthropic / Gemini 兼容的 API 网关。</p>"
                 "<p><a href=\"/panel\">用户面板</a>（登录/注册/兑换额度/API Key）</p>"
                 "<p>可用端点（均需凭证）：</p>"
                 "<ul><li><code>GET /v1/models</code></li>"
                 "<li><code>POST /v1/chat/completions</code></li>"
                 "<li><code>POST /v1/messages</code></li>"
                 "<li><code>POST /v1/embeddings</code></li>"
-                "<li><code>POST /v1/responses</code></li></ul>"
+                "<li><code>POST /v1/responses</code></li>"
+                "<li><code>POST /v1beta/models/{model}:generateContent</code>（Gemini 原生，含 <code>:streamGenerateContent</code>）</li></ul>"
                 "<p>健康检查：<code>GET /healthz</code>（无需凭证，供 Docker/负载均衡探活）。</p>"
                 "<p style=\"color:#888\">凭证无效或缺失会返回 401；"
                 "超过限额返回 429。拿测试密钥做连通性检查是正常用法。</p>"
@@ -2247,13 +2249,17 @@ class RelayHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/auth/") or path.startswith("/api/user/"):
             self._handle_panel_api(path)
             return
-        if path not in ("/v1/messages", "/v1/chat/completions", "/v1/responses"):
+        gemini_path = re.match(
+            r"^/v1beta/models/([^/:]+):(generateContent|streamGenerateContent)$", path
+        )
+        if path not in ("/v1/messages", "/v1/chat/completions", "/v1/responses") and not gemini_path:
             self._error(404, f"未知路径 {self.path}", "not_found_error")
             return
         started = time.monotonic()
-        # 入站协议决定出站编码：两个口共用同一套路由，只有「怎么说话」不同。
+        # 入站协议决定出站编码：各口共用同一套路由，只有「怎么说话」不同。
         dialect = ("openai" if path == "/v1/chat/completions"
-                   else "responses" if path == "/v1/responses" else "anthropic")
+                   else "responses" if path == "/v1/responses"
+                   else "gemini" if gemini_path else "anthropic")
 
         # 单 IP 限流：放在鉴权之前——刷请求的人不带有效凭证也一样占带宽。
         # 鉴权失败的请求同样计入（这正是要防的：拿垃圾凭证打接口探测）。
@@ -2379,6 +2385,11 @@ class RelayHandler(BaseHTTPRequestHandler):
         model = str(body.get("model") or "")
         # stream 要在协议翻译前取走：翻译后的 Anthropic 形态里没有这个字段。
         streaming = bool(body.get("stream"))
+        if gemini_path:
+            # 入站 Gemini：模型在路径里，请求体转成内部 Anthropic 形态再走同一条链路
+            model = gemini_path.group(1)
+            streaming = gemini_path.group(2) == "streamGenerateContent"
+            body = gemini_api.from_gemini_request(body, model, streaming=streaming)
         if not model:
             self._error(400, "缺少 model", dialect=dialect)
             self._log_request(
@@ -2967,6 +2978,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._send_json(200, openai_completion(model, outcome.message))
         elif dialect == "responses":
             self._send_json(200, responses_completion(model, outcome.message))
+        elif dialect == "gemini":
+            self._send_json(200, gemini_api.to_gemini_response(outcome.message, model))
         else:
             self._send_json(200, outcome.message)
 

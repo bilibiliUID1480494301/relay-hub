@@ -15,7 +15,7 @@
 | 用户 | 用户 CRUD、计费规则（标价 / 分组倍率 / **峰时分时**）、开放注册、兑换码批量生成 |
 | 请求 / 用量 | 请求日志明细；用量汇总卡片（请求/成功/失败/tokens/**收入/上游成本/利润**）+ 按日/令牌/模型/渠道分桶 |
 | 插件 / 动态口令 / 审计 | 插件分账日志、TOIP 站点口令、审计流水 |
-| 账单 | 上游 new-api 余额/倍率/单次成本（管理员）；勾选开放本站 billing 接口 |
+| 账单 | 上游 new-api 余额/倍率/单次成本；**服务商一键测试**（13 家，勾选→填 Key→模型+余额）；本站 billing 开关 |
 
 ## 页面自定义（主题令牌）
 
@@ -80,6 +80,7 @@ python -m relayhub.gateway users ls                    # 列出用户 / 角色 /
 
 ## API 一览（管理面 HTTP 接口）
 
+- `POST /v1beta/models/{model}:generateContent`：Gemini 原生入站（含 `:streamGenerateContent`）
 - `GET /api/state`：渠道/令牌/健康总览
 - `POST /api/keys` / `PATCH /api/keys/{id}`：渠道增改（含 group、cost_multiplier、price_in/out_per_1k）
 - `GET /api/usage?days=N`：用量汇总（window 含 revenue / upstream_cost / profit）
@@ -89,3 +90,20 @@ python -m relayhub.gateway users ls                    # 列出用户 / 角色 /
 - `GET/POST /api/features`：功能开关（`billing_enabled` 等）
 - `POST /api/newapi`：查上游 new-api 余额 / 分组倍率（`{base_url, api_key, start_date, end_date}`）
 - `POST /api/newapi/cost`：按 `request_id`（`X-Oneapi-Request-Id`）查单次成本
+
+
+## 服务商一键测试
+
+「账单」页上半部分：勾选服务商 → 填 Key（域名可覆盖预填值）→「测试选中」。
+每家同时查**模型端点**与**余额端点**，一行一家：
+
+| 字段 | 说明 |
+|---|---|
+| 模型 | `/v1/models`（Gemini 为 `/v1beta/models`，智谱为 `/v4/models`）返回的条数 |
+| 余额 | 有余额接口的解析成金额+币种；取不到只标错，不影响该家可用性 |
+| 协议 | 该家支持的上游协议（`openai-chat` / `anthropic-messages` / `gemini-api`） |
+
+内置 13 家：OpenAI、Anthropic、Gemini、DeepSeek、Kimi（月之暗面）、Kimi 国际站、
+硅基流动、OpenRouter、Groq、Mistral、Together、智谱 GLM、new-api / one-api。
+
+密钥只用于本次探测，不落盘；审计只记服务商名。接口：`GET /api/providers`、`POST /api/probe`。

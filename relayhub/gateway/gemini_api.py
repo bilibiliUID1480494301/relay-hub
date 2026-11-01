@@ -294,3 +294,132 @@ def stream(
     yield "message_stop", {"type": "message_stop"}
     if on_usage:
         on_usage(tokens_in, tokens_out)
+
+
+# ---------------------------------------------------------------- 入站（客户端用 Gemini 原生协议调我们）
+
+
+def from_gemini_request(payload: dict[str, Any], model: str, *, streaming: bool = False) -> dict[str, Any]:
+    """Gemini generateContent 请求 → 内部 Anthropic 形态。"""
+    system_parts: list[str] = []
+    for key in ("systemInstruction", "system_instruction"):
+        block = payload.get(key) or {}
+        if isinstance(block, dict):
+            for part in block.get("parts") or []:
+                if isinstance(part, dict) and part.get("text"):
+                    system_parts.append(str(part["text"]))
+
+    messages: list[dict[str, Any]] = []
+    for item in payload.get("contents") or []:
+        if not isinstance(item, dict):
+            continue
+        role = "assistant" if item.get("role") == "model" else "user"
+        blocks: list[dict[str, Any]] = []
+        for part in item.get("parts") or []:
+            if not isinstance(part, dict):
+                continue
+            if "text" in part:
+                blocks.append({"type": "text", "text": str(part.get("text") or "")})
+            elif "functionCall" in part:
+                call = part["functionCall"] or {}
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": f"call_{uuid.uuid4().hex[:16]}",
+                        "name": call.get("name"),
+                        "input": call.get("args") or {},
+                    }
+                )
+            elif "functionResponse" in part:
+                resp = part["functionResponse"] or {}
+                blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": str(resp.get("name") or ""),
+                        "content": json.dumps(resp.get("response") or {}, ensure_ascii=False),
+                    }
+                )
+        if blocks:
+            messages.append({"role": role, "content": blocks})
+
+    tools: list[dict[str, Any]] = []
+    for group in payload.get("tools") or []:
+        if not isinstance(group, dict):
+            continue
+        for decl in group.get("functionDeclarations") or []:
+            if not isinstance(decl, dict) or not decl.get("name"):
+                continue
+            tools.append(
+                {
+                    "name": decl["name"],
+                    "description": decl.get("description", ""),
+                    "input_schema": decl.get("parameters") or {"type": "object", "properties": {}},
+                }
+            )
+
+    generation = payload.get("generationConfig") or {}
+    out: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": int(generation.get("maxOutputTokens") or 4096),
+        "stream": bool(streaming or payload.get("stream")),
+    }
+    if system_parts:
+        out["system"] = chr(10).join(system_parts)
+    if generation.get("temperature") is not None:
+        out["temperature"] = generation["temperature"]
+    if generation.get("topP") is not None:
+        out["top_p"] = generation["topP"]
+    if generation.get("stopSequences"):
+        out["stop_sequences"] = list(generation["stopSequences"])
+    if tools:
+        out["tools"] = tools
+    return out
+
+
+def to_gemini_response(message: dict[str, Any], model: str) -> dict[str, Any]:
+    """Anthropic message → Gemini generateContent 响应。"""
+    parts: list[dict[str, Any]] = []
+    for block in message.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            parts.append({"text": str(block.get("text") or "")})
+        elif block.get("type") == "tool_use":
+            parts.append({"functionCall": {"name": block.get("name"), "args": block.get("input") or {}}})
+    usage = message.get("usage") or {}
+    tokens_in = int(usage.get("input_tokens") or 0)
+    tokens_out = int(usage.get("output_tokens") or 0)
+    return {
+        "candidates": [
+            {
+                "content": {"role": "model", "parts": parts},
+                "finishReason": "STOP",
+                "index": 0,
+            }
+        ],
+        "usageMetadata": {
+            "promptTokenCount": tokens_in,
+            "candidatesTokenCount": tokens_out,
+            "totalTokenCount": tokens_in + tokens_out,
+        },
+        "modelVersion": model,
+    }
+
+
+def to_gemini_chunks(events: Any) -> Iterator[dict[str, Any]]:
+    """Anthropic SSE 事件 → Gemini streamGenerateContent 的分片。"""
+    for event, payload in events or ():
+        if event == "content_block_delta":
+            delta = payload.get("delta") or {}
+            if delta.get("type") == "text_delta" and delta.get("text"):
+                yield {"candidates": [{"content": {"role": "model", "parts": [{"text": delta["text"]}]}}]}
+        elif event == "message_delta":
+            usage = payload.get("usage") or {}
+            yield {
+                "candidates": [{"finishReason": "STOP", "index": 0}],
+                "usageMetadata": {
+                    "promptTokenCount": int(usage.get("input_tokens") or 0),
+                    "candidatesTokenCount": int(usage.get("output_tokens") or 0),
+                },
+            }

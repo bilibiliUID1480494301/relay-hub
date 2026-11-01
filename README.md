@@ -46,7 +46,8 @@
   `Station` API. On the client side, `StationClient` speaks  
   models/messages/MCP/A2A with an optional E2E envelope — both sides pure  
   stdlib, both importable from the package root.
-- **Protocols + embeddings**: `POST /v1/messages` (Anthropic),  
+- **Protocols + embeddings**: `POST /v1/messages` (Anthropic),
+  `POST /v1beta/models/{model}:generateContent` (Gemini native, non-stream + SSE),  
   `POST /v1/chat/completions`, `POST /v1/responses` (OpenAI Responses) and  
   `POST /v1/embeddings` behind the same credential — RAG / text tools and  
   newer agent clients work out of the box.
@@ -62,6 +63,9 @@
   (`pluginlogs/<plugin_id>/`), written alongside — not instead of — the global  
   request log. `X-DSH-Plugin-Id` tags the traffic; a TOIP-issued token is  
   already bound to a plugin, so tagging works even without the header.
+- **Provider probe**: tick providers, paste a key, and get **models + balance** at once
+  (13 presets: OpenAI / Anthropic / Gemini / DeepSeek / Kimi (CN & intl) / SiliconFlow /
+  OpenRouter / Groq / Mistral / Together / Zhipu / new-api).
 - **Admin console**: local web UI for channels / tokens / policies / request log /  
   usage / audit / **plugins** / **dynamic password** — with an EN/中文 toggle in  
   the header.
