@@ -40,6 +40,7 @@ from . import reqlog as reqlog_module
 from . import toip as toip_module
 from . import newapi as newapi_module
 from . import providers as providers_module
+from . import pricing as pricing_module
 from . import features as features_module
 from . import site as site_module
 from . import upstream
@@ -517,12 +518,16 @@ class AdminHandler(BaseHTTPRequestHandler):
         known = parts[:2] in (
             ["api", "keys"], ["api", "tokens"],
             ["api", "users"], ["api", "codes"], ["api", "policy"],
-            ["api", "newapi"], ["api", "features"], ["api", "probe"],
+            ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"],
         ) or parts in (
             ["api", "settings"], ["api", "webui"],
         )
         if not known:
             self._error(404, f"未知路径 {self.path}")
+            return
+
+        if parts == ["api", "pricing"] and method == "POST":
+            self._pricing()
             return
 
         if parts == ["api", "probe"] and method == "POST":
@@ -1288,6 +1293,24 @@ class AdminHandler(BaseHTTPRequestHandler):
             "channels": asdict(pool.totals()),
             "tokens": TokenPool.load(self.server.tokens_path).stats()["tokens"],  # type: ignore[attr-defined]
         }
+
+    def _pricing(self) -> None:
+        """拉上游 /api/pricing（new-api / relay-hub）并整理成模型×倍率×分组。"""
+        body = self._read_json() or {}
+        try:
+            data = pricing_module.fetch(
+                str(body.get("base_url") or "").strip(),
+                str(body.get("api_key") or "").strip(),
+            )
+        except pricing_module.PricingError as exc:
+            self._error(400, str(exc))
+            return
+        audit_module.record(
+            "pricing.fetch",
+            path=self.server.audit_path,  # type: ignore[attr-defined]
+            count=str(data.get("count") or 0),
+        )
+        self._send_json(200, data)
 
     def _probe_provider(self) -> None:
         """按服务商预设查模型/余额（管理面功能，仅管理员可用）。"""

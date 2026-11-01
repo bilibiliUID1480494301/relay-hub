@@ -155,6 +155,17 @@ CATALOG: list[dict[str, Any]] = [
         "note": "",
     },
     {
+        "protocols": ["openai-chat", "anthropic-messages", "gemini-api"],
+        "key": "relayhub",
+        "label": "relay-hub 本站",
+        "base": "",
+        "auth": "bearer",
+        "models": "/v1/models",
+        "balance": "/v1/usage",
+        "balance_kind": "relayhub",
+        "note": "填本站域名",
+    },
+    {
         "protocols": ["openai-chat", "anthropic-messages"],
         "key": "newapi",
         "label": "new-api / one-api",
@@ -287,6 +298,14 @@ def _balance(kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
                 "amount": round(total - (used or 0), 6),
                 "currency": "USD",
                 "detail": data,
+            }
+    elif kind == "relayhub":
+        quota = _num(payload.get("quota"))
+        if quota is not None:
+            return {
+                "amount": quota - (_num(payload.get("used")) or 0),
+                "currency": "points",
+                "detail": {"quota": quota, "used": _num(payload.get("used")) or 0},
             }
     elif kind in ("openai", "newapi"):
         hard = _num(payload.get("hard_limit_usd"))

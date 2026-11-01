@@ -63,7 +63,8 @@
   (`pluginlogs/<plugin_id>/`), written alongside — not instead of — the global  
   request log. `X-DSH-Plugin-Id` tags the traffic; a TOIP-issued token is  
   already bound to a plugin, so tagging works even without the header.
-- **Provider probe**: tick providers, paste a key, and get **models + balance** at once
+- **Provider probe + pricing**: tick providers, paste a key, get **models + balance** at once;
+  new-api / relay-hub pricing tables (`/api/pricing`) are parsed into model × ratio × group × endpoints.
   (13 presets: OpenAI / Anthropic / Gemini / DeepSeek / Kimi (CN & intl) / SiliconFlow /
   OpenRouter / Groq / Mistral / Together / Zhipu / new-api).
 - **Admin console**: local web UI for channels / tokens / policies / request log /  

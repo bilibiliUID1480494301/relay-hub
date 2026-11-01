@@ -2987,7 +2987,10 @@ class RelayHandler(BaseHTTPRequestHandler):
         """写整条流。返回 False 表示中途出错（调用方据此记令牌失败，不再补状态码）。"""
         self._begin_sse()
         try:
-            if dialect == "openai":
+            if dialect == "gemini":
+                for chunk in gemini_api.to_gemini_chunks(outcome.events or ()):
+                    self._sse_raw(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n")
+            elif dialect == "openai":
                 for item in openai_chunks(outcome.model, outcome.events or ()):
                     self._sse_raw(f"data: {json.dumps(item, ensure_ascii=False)}\n\n")
                 self._sse_raw("data: [DONE]\n\n")

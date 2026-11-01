@@ -107,3 +107,21 @@ python -m relayhub.gateway users ls                    # 列出用户 / 角色 /
 硅基流动、OpenRouter、Groq、Mistral、Together、智谱 GLM、new-api / one-api。
 
 密钥只用于本次探测，不落盘；审计只记服务商名。接口：`GET /api/providers`、`POST /api/probe`。
+
+
+## 上游定价表（new-api / relay-hub）
+
+`POST /api/pricing {base_url, api_key}` 拉 `/api/pricing` 并整理成：模型 × 倍率 × 分组 × 端点。
+`billing_expr` 原样带回（站点自己的计费口径，不重算）。
+
+- `relayhub` 预设：模型 `/v1/models`、余额 `/v1/usage`（`quota - used`，单位「点」）
+- `newapi` 预设：模型 `/v1/models`、余额 `/v1/dashboard/billing/subscription`
+
+
+## 上游定价表（new-api / relay-hub）
+
+`POST /api/pricing {base_url, api_key}` 拉 `/api/pricing` 并整理成：模型 × 倍率 × 分组 × 端点。
+`billing_expr` 原样带回（站点自己的计费口径，不重算）。
+
+- `relayhub` 预设：模型 `/v1/models`、余额 `/v1/usage`（`quota - used`，单位「点」）
+- `newapi` 预设：模型 `/v1/models`、余额 `/v1/dashboard/billing/subscription`
