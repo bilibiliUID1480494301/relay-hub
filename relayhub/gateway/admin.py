@@ -39,6 +39,7 @@ from . import pluginlogs as pluginlogs_module
 from . import reqlog as reqlog_module
 from . import toip as toip_module
 from . import newapi as newapi_module
+from . import providers as providers_module
 from . import features as features_module
 from . import site as site_module
 from . import upstream
@@ -480,6 +481,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             "/api/webui": self._webui_state,
             "/api/policy": lambda: self.server.policy.state(),
             "/api/features": lambda: features_module.load(paths.features_path()),
+            "/api/providers": providers_module.catalog,
         }
         if path in read_routes:
             if not self._authorized():
@@ -514,12 +516,16 @@ class AdminHandler(BaseHTTPRequestHandler):
         known = parts[:2] in (
             ["api", "keys"], ["api", "tokens"],
             ["api", "users"], ["api", "codes"], ["api", "policy"],
-            ["api", "newapi"], ["api", "features"],
+            ["api", "newapi"], ["api", "features"], ["api", "probe"],
         ) or parts in (
             ["api", "settings"], ["api", "webui"],
         )
         if not known:
             self._error(404, f"未知路径 {self.path}")
+            return
+
+        if parts == ["api", "probe"] and method == "POST":
+            self._probe_provider()
             return
 
         if parts == ["api", "features"]:
@@ -1282,6 +1288,28 @@ class AdminHandler(BaseHTTPRequestHandler):
             "tokens": TokenPool.load(self.server.tokens_path).stats()["tokens"],  # type: ignore[attr-defined]
         }
 
+    def _probe_provider(self) -> None:
+        """按服务商预设查模型/余额（管理面功能，仅管理员可用）。"""
+        body = self._read_json() or {}
+        try:
+            result = providers_module.probe(
+                str(body.get("provider") or ""),
+                str(body.get("api_key") or ""),
+                str(body.get("base_url") or "").strip() or None,
+            )
+        except providers_module.ProbeError as exc:
+            self._error(400, str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._error(400, f"{type(exc).__name__}: {exc}")
+            return
+        audit_module.record(
+            "provider.probe",
+            path=self.server.audit_path,  # type: ignore[attr-defined]
+            provider=str(result.get("provider") or ""),
+        )
+        self._send_json(200, result)
+
     def _newapi_probe(self) -> None:
         """查 new-api 站点的额度/用量/分组倍率（管理面功能，仅管理员可用）。"""
         body = self._read_json() or {}
@@ -1987,6 +2015,17 @@ display:none;border:1px solid var(--line);background:var(--panel)}
   <p class="hint" id="na-cost-msg"></p>
 </section>
 <section class="panel">
+  <h2>服务商一键测试</h2>
+  <p class="hint">勾选服务商、填 Key（域名可覆盖预填值）；「测试选中」同时查模型端点与余额端点。
+  余额接口受账号/套餐限制，取不到只标错，不影响模型结果。</p>
+  <div id="pv-list"></div>
+  <div class="row" style="margin-top:8px">
+    <button id="pv-run">测试选中</button>
+    <span class="hint" id="pv-msg"></span>
+  </div>
+  <div id="pv-out"></div>
+</section>
+<section class="panel">
   <h2>本站在线查询（billing 接口）</h2>
   <p class="hint">开启后，下游用自己的令牌即可访问 <code>/v1/dashboard/billing/subscription</code> 与
   <code>/v1/dashboard/billing/usage</code>（对标 new-api）。默认关闭，改完即时生效、无需重启。</p>
@@ -2332,6 +2371,7 @@ function naInit(){
   if(!e.value){e.value=new Date().toISOString().slice(0,10);}
   if(!s.value){s.value=new Date(Date.now()-29*864e5).toISOString().slice(0,10);}
   loadFeatures();
+  loadProviders();
 }
 function naFmt(v){return (v==null)?'—':(Math.round(v*10000)/10000);}
 function renderNewApi(s){
@@ -2367,6 +2407,48 @@ document.getElementById('na-cost').onclick=function(){
     request_id:document.getElementById('na-rid').value.trim()
   }).then(function(s){msg.textContent='成本：'+JSON.stringify(s.result);})
     .catch(function(e){msg.textContent='失败：'+e.message;});
+};
+
+function loadProviders(){
+  var box=document.getElementById('pv-list'); if(!box) return;
+  api('GET','/api/providers').then(function(list){
+    box.innerHTML=list.map(function(p){
+      return '<div class="row" data-pv="'+p.key+'" style="align-items:center">'
+        +'<label style="flex-direction:row;align-items:center;gap:6px;min-width:170px">'
+        +'<input type="checkbox" class="pv-check" data-key="'+p.key+'"> '+esc(p.label)+'</label>'
+        +'<input class="pv-base" placeholder="'+esc(p.base||'https://站点域名')+'" style="min-width:220px">'
+        +'<input class="pv-key" type="password" placeholder="API Key" style="min-width:200px">'
+        +'<span class="hint">'+esc((p.protocols||[]).join(' / '))+(p.has_balance?'':' · 无余额接口')+'</span>'
+        +'</div>';
+    }).join('');
+  }).catch(function(){});
+}
+document.getElementById('pv-run').onclick=function(){
+  var msg=document.getElementById('pv-msg'), out=document.getElementById('pv-out');
+  var rows=[].slice.call(document.querySelectorAll('#pv-list [data-pv]')).filter(function(r){
+    return r.querySelector('.pv-check').checked;});
+  if(!rows.length){msg.textContent='先勾选服务商';return;}
+  msg.textContent='测试 '+rows.length+' 家…'; out.innerHTML='';
+  Promise.all(rows.map(function(r){
+    var key=r.getAttribute('data-pv');
+    return api('POST','/api/probe',{provider:key,
+      api_key:r.querySelector('.pv-key').value,
+      base_url:r.querySelector('.pv-base').value.trim()})
+      .then(function(res){return {res:res};})
+      .catch(function(e){return {err:e.message,key:key};});
+  })).then(function(all){
+    msg.textContent='';
+    out.innerHTML='<div style="overflow-x:auto"><table><thead><tr>'
+      +'<th>服务商</th><th>模型</th><th>余额</th><th>耗时</th><th>备注</th></tr></thead><tbody>'
+      + all.map(function(x){
+          if(x.err){return '<tr><td>'+esc(x.key)+'</td><td colspan="4">'+esc(x.err)+'</td></tr>';}
+          var r=x.res;
+          var bal=r.balance? (r.balance.amount+' '+r.balance.currency)
+                           : (r.balance_error? '—（'+esc(r.balance_error)+'）' : '—');
+          return '<tr><td>'+esc(r.label)+'</td><td>'+r.models+'</td><td>'+esc(bal)+'</td>'
+            +'<td>'+r.elapsed_ms+'ms</td><td>'+esc(r.error||r.base_url)+'</td></tr>';
+        }).join('')+'</tbody></table></div>';
+  });
 };
 
 function loadFeatures(){

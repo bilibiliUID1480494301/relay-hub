@@ -27,10 +27,12 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
+from . import gemini_api
 from . import connpool
 from .pool import (
     AUTH_MODE_BEARER,
     PROTOCOL_ANTHROPIC,
+    PROTOCOL_GEMINI_API,
     UpstreamKey,
 )
 
@@ -711,6 +713,12 @@ def call_once(
     timeout: float = 120.0,
     trace_headers: dict[str, str] | None = None,
 ) -> UpstreamReply:
+    if key.protocol == PROTOCOL_GEMINI_API:
+        try:
+            message, tokens_in, tokens_out = gemini_api.call(key, payload, timeout)
+        except gemini_api.GeminiApiError as exc:
+            raise UpstreamError(exc.status, exc.detail, _retryable(exc.status)) from exc
+        return UpstreamReply(message=message, tokens_in=tokens_in, tokens_out=tokens_out)
     anthropic_side = key.protocol == PROTOCOL_ANTHROPIC
     path = "/messages" if anthropic_side else "/chat/completions"
     connection, url = _open(key, path, timeout)
@@ -831,7 +839,9 @@ def stream_events(
     上游是 anthropic 协议时原样透传；是 openai 协议时边收边翻译。
     连不上 / 非 200 会在第一次 next() 时抛出，因此调用方可以先 peek 再决定是否放弃这个 Key。
     """
-    if key.protocol == PROTOCOL_ANTHROPIC:
+    if key.protocol == PROTOCOL_GEMINI_API:
+        yield from gemini_api.stream(key, payload, timeout, on_usage)
+    elif key.protocol == PROTOCOL_ANTHROPIC:
         yield from _stream_anthropic(key, payload, timeout, on_usage, trace_headers)
     else:
         yield from _stream_openai_as_anthropic(key, payload, timeout, on_usage, trace_headers)

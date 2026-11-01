@@ -25,7 +25,9 @@ from typing import Callable, Sequence
 
 PROTOCOL_ANTHROPIC = "anthropic-messages"
 PROTOCOL_OPENAI_CHAT = "openai-chat"
-SUPPORTED_PROTOCOLS = (PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI_CHAT)
+# 公开 Gemini API（API Key）：v1beta generateContent / streamGenerateContent
+PROTOCOL_GEMINI_API = "gemini-api"
+SUPPORTED_PROTOCOLS = (PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI_CHAT, PROTOCOL_GEMINI_API)
 
 # 鉴权头模式：auto=按协议默认（anthropic→x-api-key，openai→Bearer）；
 # bearer=强制 Authorization: Bearer（部分上游要求 Bearer 而不是 x-api-key）。
