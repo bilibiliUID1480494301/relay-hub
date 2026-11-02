@@ -483,6 +483,13 @@ def to_openai_request(payload: dict[str, Any]) -> dict[str, Any]:
                 out["reasoning_effort"] = "medium"
             elif budget > 0:
                 out["reasoning_effort"] = "low"
+    # 把 OpenAI 带进来、IR 暂存在 _extras 的参数回填（OpenAI 不认 top_k，别塞）。
+    extras = payload.get("_extras") or {}
+    if extras.get("response_format") and "response_format" not in out:
+        out["response_format"] = extras["response_format"]
+    for key in ("seed", "presence_penalty", "frequency_penalty", "n"):
+        if out.get(key) is None and extras.get(key) is not None:
+            out[key] = extras[key]
     return out
 
 
@@ -629,6 +636,17 @@ def to_anthropic_request(payload: dict[str, Any]) -> dict[str, Any]:
         "messages": messages,
         "max_tokens": int(payload.get("max_tokens") or DEFAULT_MAX_TOKENS),
     }
+    # 内部 IR 用 Anthropic 形态，但 OpenAI 带进来的这些概念 Anthropic 没有：
+    # 塞进 _extras 随请求走，出站时各协议按自己能表达的部分取用。
+    extras: dict[str, Any] = {}
+    if payload.get("response_format") is not None:
+        extras["response_format"] = payload["response_format"]
+    for key in ("seed", "top_k", "presence_penalty", "frequency_penalty", "n"):
+        if payload.get(key) is not None:
+            extras[key] = payload[key]
+    if extras:
+        out["_extras"] = extras
+
     if system_parts:
         # Anthropic 的 system 是顶层字段，不是一条消息。
         out["system"] = "\n\n".join(system_parts)

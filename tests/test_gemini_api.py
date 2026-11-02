@@ -143,3 +143,41 @@ def test_to_gemini_response_and_chunks():
     assert out["usageMetadata"]["totalTokenCount"] == 5
     chunks = list(gemini_api.to_gemini_chunks([("content_block_delta", {"delta": {"type": "text_delta", "text": "hi"}})]))
     assert chunks[0]["candidates"][0]["content"]["parts"][0]["text"] == "hi"
+
+
+def test_gemini_request_keeps_sampling_params_gemini_supports():
+    payload = {
+        "model": "m",
+        "max_tokens": 32,
+        "messages": [{"role": "user", "content": "hi"}],
+        "temperature": 0.2,
+        "top_p": 0.8,
+        "top_k": 40,
+        "seed": 7,
+        "presence_penalty": 0.5,
+        "frequency_penalty": 0.25,
+        "n": 2,
+        "stop_sequences": ["END"],
+    }
+    gen = gemini_api.to_gemini_request(payload, "m")["generationConfig"]
+    assert gen["topK"] == 40
+    assert gen["seed"] == 7
+    assert gen["presencePenalty"] == 0.5
+    assert gen["frequencyPenalty"] == 0.25
+    assert gen["candidateCount"] == 2
+    assert gen["maxOutputTokens"] == 32
+    assert gen["stopSequences"] == ["END"]
+
+
+def test_response_format_becomes_gemini_schema():
+    payload = {
+        "model": "m",
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "p", "schema": {"type": "object"}}},
+        "seed": 3,
+    }
+    gen = gemini_api.to_gemini_request(payload, "m")["generationConfig"]
+    assert gen["responseMimeType"] == "application/json"
+    assert gen["responseSchema"] == {"type": "object"}
+    assert gen["seed"] == 3

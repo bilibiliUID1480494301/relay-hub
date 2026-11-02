@@ -36,3 +36,22 @@ def test_relayhub_balance_parses_quota_minus_used():
     bal = _balance("relayhub", {"quota": 1000, "used": 250})
     assert bal["amount"] == 750
     assert bal["currency"] == "points"
+
+
+def test_openai_extras_survive_ir_round_trip():
+    from relayhub.gateway.upstream import to_anthropic_request, to_openai_request
+
+    source = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "p", "schema": {"type": "object"}}},
+        "seed": 42,
+        "presence_penalty": 0.4,
+    }
+    ir = to_anthropic_request(source)
+    assert ir["_extras"]["seed"] == 42
+    back = to_openai_request(ir)
+    assert back["response_format"]["json_schema"]["name"] == "p"
+    assert back["seed"] == 42
+    assert back["presence_penalty"] == 0.4
+    assert "top_k" not in back

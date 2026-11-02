@@ -25,6 +25,17 @@ class GeminiApiError(RuntimeError):
         self.detail = detail
 
 
+def _json_schema_of(response_format: Any) -> dict[str, Any] | None:
+    """OpenAI response_format（Chat 嵌套 / Responses 扁平）→ JSON Schema。"""
+    if not isinstance(response_format, dict):
+        return None
+    if response_format.get("type") != "json_schema":
+        return None
+    inner = response_format.get("json_schema") or {}
+    schema = inner.get("schema") or response_format.get("schema")
+    return schema if isinstance(schema, dict) else None
+
+
 def _text_of(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -103,9 +114,29 @@ def to_gemini_request(payload: dict[str, Any], model: str) -> dict[str, Any]:
     generation: dict[str, Any] = {}
     if payload.get("max_tokens"):
         generation["maxOutputTokens"] = int(payload["max_tokens"])
-    for source, target in (("temperature", "temperature"), ("top_p", "topP")):
-        if payload.get(source) is not None:
-            generation[target] = payload[source]
+    # Gemini 的采样参数比 Anthropic 宽：topK / seed / presencePenalty / frequencyPenalty
+    # / candidateCount 都能表达，别丢（此前只映射了 temperature 和 topP）。
+    extras = payload.get("_extras") or {}
+    for source, target in (
+        ("temperature", "temperature"),
+        ("top_p", "topP"),
+        ("top_k", "topK"),
+        ("seed", "seed"),
+        ("presence_penalty", "presencePenalty"),
+        ("frequency_penalty", "frequencyPenalty"),
+    ):
+        value = payload.get(source)
+        if value is None:
+            value = extras.get(source)
+        if value is not None:
+            generation[target] = value
+    count = payload.get("n") or extras.get("n")
+    if count:
+        generation["candidateCount"] = int(count)
+    schema = _json_schema_of(extras.get("response_format") or payload.get("response_format"))
+    if schema:
+        generation["responseMimeType"] = "application/json"
+        generation["responseSchema"] = schema
     if payload.get("stop_sequences"):
         generation["stopSequences"] = list(payload["stop_sequences"])
     if generation:

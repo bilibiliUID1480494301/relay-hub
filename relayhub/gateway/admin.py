@@ -40,7 +40,7 @@ from . import reqlog as reqlog_module
 from . import toip as toip_module
 from . import newapi as newapi_module
 from . import providers as providers_module
-from . import pricing as pricing_module
+from .. import pricing as pricing_module
 from . import features as features_module
 from . import site as site_module
 from . import upstream
