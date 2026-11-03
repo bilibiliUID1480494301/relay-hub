@@ -42,6 +42,7 @@ from . import reqlog as reqlog_module
 from . import toip as toip_module
 from .conformance import main as conformance_main, Probe
 from .pool import (
+    SUPPORTED_PROTOCOLS,
     PROTOCOL_ANTHROPIC,
     PROTOCOL_OPENAI_CHAT,
     KeyPool,
@@ -651,10 +652,7 @@ def _cmd_pool(argv: list[str]) -> int:
     p_add.add_argument(
         "--protocol",
         default=PROTOCOL_ANTHROPIC,
-        choices=[
-            PROTOCOL_ANTHROPIC,
-            PROTOCOL_OPENAI_CHAT,
-        ],
+        choices=list(SUPPORTED_PROTOCOLS),
     )
     p_add.add_argument(
         "--auth-mode",

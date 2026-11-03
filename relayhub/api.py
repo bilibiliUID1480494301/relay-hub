@@ -39,6 +39,7 @@ from .gateway.pool import (
     AUTH_MODE_AUTO,
     PROTOCOL_ANTHROPIC,
     PROTOCOL_OPENAI_CHAT,
+    SUPPORTED_PROTOCOLS,
     KeyPool,
     UpstreamKey,
 )
@@ -184,7 +185,7 @@ class Station:
             if p in (PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI_CHAT):
                 return p
             raise ValueError(
-                f"protocol must be '{PROTOCOL_ANTHROPIC}' or '{PROTOCOL_OPENAI_CHAT}', got {protocol!r}"
+                f"protocol must be one of {SUPPORTED_PROTOCOLS}, got {protocol!r}"
             )
         # guess: anthropic in URL → Anthropic protocol; otherwise OpenAI-compatible
         return PROTOCOL_ANTHROPIC if "anthropic" in base_url.lower() else PROTOCOL_OPENAI_CHAT

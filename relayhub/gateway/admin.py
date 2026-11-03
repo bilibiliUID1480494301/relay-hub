@@ -491,7 +491,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, read_routes[path]())
             return
-        self._error(404, f"未知路径 {self.path}")
+        self._error(404, f"未知路径 {self.path.split('?')[0]}")
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path.rstrip("/")
@@ -523,7 +523,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             ["api", "settings"], ["api", "webui"],
         )
         if not known:
-            self._error(404, f"未知路径 {self.path}")
+            self._error(404, f"未知路径 {self.path.split('?')[0]}")
             return
 
         if parts == ["api", "pricing"] and method == "POST":
@@ -605,7 +605,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._probe(identifier)
             return
         if len(parts) != 3:
-            self._error(404, f"未知路径 {self.path}")
+            self._error(404, f"未知路径 {self.path.split('?')[0]}")
             return
         if method == "PUT":
             self._update_key(identifier)
@@ -931,7 +931,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._error(405, "用 POST 建用户 / PUT 改计费设置")
             return
         if len(parts) != 3:
-            self._error(404, f"未知路径 {self.path}")
+            self._error(404, f"未知路径 {self.path.split('?')[0]}")
             return
         target = parts[2]
 
@@ -1090,7 +1090,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"token": secret, "tokens": pool.stats()["tokens"]})
             return
         if len(parts) != 3:
-            self._error(404, f"未知路径 {self.path}")
+            self._error(404, f"未知路径 {self.path.split('?')[0]}")
             return
         identifier = parts[2]
         pool = TokenPool.load(tokens_path)

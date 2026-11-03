@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import re
 import ssl
 import threading
 import time
@@ -194,13 +195,25 @@ def _iter_lines(response: Any) -> Iterator[bytes]:
         yield line
 
 
+_SECRET_RE = re.compile(
+    r"(sk-[A-Za-z0-9_\-]{6,}|rht_[A-Za-z0-9_\-]{6,}|rhe_[A-Za-z0-9_\-]{6,}"
+    r"|Bearer\s+[A-Za-z0-9._\-]{6,}|x-api-key['\"]?\s*[:=]\s*[A-Za-z0-9._\-]{6,})",
+    re.I,
+)
+
+
+def scrub_secrets(text: str) -> str:
+    """上游错误体可能回显我们发过去的凭证，绝不能原样带给下游。"""
+    return _SECRET_RE.sub("***", text)
+
+
 def _read_error(response: Any) -> str:
     try:
         raw = response.read()
     except OSError:
         return "<读取错误响应失败>"
     text = raw.decode("utf-8", errors="replace").strip()
-    return text[:400] or "<空响应体>"
+    return scrub_secrets(text[:400]) or "<空响应体>"
 
 
 # ---------------------------------------------------------------- 请求翻译

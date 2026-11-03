@@ -2184,7 +2184,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._send_json(200, self.usage_for(identity))
             return
         if path != "/v1/models":
-            self._error(404, f"未知路径 {self.path}", "not_found_error")
+            self._error(404, f"未知路径 {self.path.split('?')[0]}", "not_found_error")
             return
         authorized, identity = self._authenticate()
         if not authorized:
@@ -2253,7 +2253,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             r"^/v1beta/models/([^/:]+):(generateContent|streamGenerateContent)$", path
         )
         if path not in ("/v1/messages", "/v1/chat/completions", "/v1/responses") and not gemini_path:
-            self._error(404, f"未知路径 {self.path}", "not_found_error")
+            self._error(404, f"未知路径 {self.path.split('?')[0]}", "not_found_error")
             return
         started = time.monotonic()
         # 入站协议决定出站编码：各口共用同一套路由，只有「怎么说话」不同。
