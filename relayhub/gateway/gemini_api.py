@@ -171,6 +171,8 @@ def _message(data: dict[str, Any]) -> tuple[dict[str, Any], int, int]:
     usage = body.get("usageMetadata") or {}
     tokens_in = int(usage.get("promptTokenCount") or 0)
     tokens_out = int(usage.get("candidatesTokenCount") or 0)
+    # Gemini 的隐式缓存命中量：不映射的话缓存统计与成本会恒为 0。
+    cached = int(usage.get("cachedContentTokenCount") or 0)
     stop = "tool_use" if any(b.get("type") == "tool_use" for b in blocks) else "end_turn"
     message = {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
@@ -180,7 +182,11 @@ def _message(data: dict[str, Any]) -> tuple[dict[str, Any], int, int]:
         "content": blocks,
         "stop_reason": stop,
         "stop_sequence": None,
-        "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out},
+        "usage": {
+            "input_tokens": tokens_in,
+            "output_tokens": tokens_out,
+            **({"cache_read_input_tokens": cached} if cached else {}),
+        },
     }
     return message, tokens_in, tokens_out
 

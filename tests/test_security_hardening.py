@@ -48,3 +48,32 @@ def test_cli_help_starts():
     )
     assert result.returncode == 0
     assert "Traceback" not in (result.stderr or "")
+
+
+def test_conformance_stops_at_done_without_closing():
+    import socket, threading, time
+    from relayhub.gateway.conformance import Probe
+
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def serve():
+        conn, _ = srv.accept()
+        conn.recv(65536)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+        )
+        for chunk in (b'data: {"delta":"hi"}\n\n', b"data: [DONE]\n\n"):
+            conn.sendall(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+        time.sleep(6)          # 故意不关连接，模拟 keep-alive 上游
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    probe = Probe(f"http://127.0.0.1:{port}")
+    started = time.monotonic()
+    raw, lines = probe.post("/v1/chat/completions", {"stream": True}, read_stream=True)
+    elapsed = time.monotonic() - started
+    srv.close()
+    assert any(b"[DONE]" in line for line in lines)
+    assert elapsed < 5, f"读到哨兵后应立即返回，实际 {elapsed:.1f}s"

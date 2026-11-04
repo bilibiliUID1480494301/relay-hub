@@ -155,6 +155,11 @@ class Probe:
                 if not line:
                     break
                 lines.append(line)
+                # 上游可能保持 keep-alive 不关连接：见到哨兵就收，别读到超时。
+                if line.startswith(b"data:") and (
+                    b"[DONE]" in line or b'"message_stop"' in line
+                ):
+                    break
             collected = b"".join(lines)
         else:
             collected = response.read()
