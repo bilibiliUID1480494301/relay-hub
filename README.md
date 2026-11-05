@@ -63,6 +63,10 @@
   (`pluginlogs/<plugin_id>/`), written alongside — not instead of — the global  
   request log. `X-DSH-Plugin-Id` tags the traffic; a TOIP-issued token is  
   already bound to a plugin, so tagging works even without the header.
+- **Model fingerprint**: per-channel `/v1/models` fingerprint detects silent backend swaps
+  (same id, changed context/modalities/ratio) without any inference calls.
+- **Model fingerprint**: per-channel `/v1/models` fingerprint detects silent backend swaps
+  (same id, changed context/modalities/ratio) without any inference calls.
 - **Provider probe + pricing**: tick providers, paste a key, get **models + balance** at once;
   new-api / relay-hub pricing tables (`/api/pricing`) are parsed into model × ratio × group × endpoints.
   (13 presets: OpenAI / Anthropic / Gemini / DeepSeek / Kimi (CN & intl) / SiliconFlow /

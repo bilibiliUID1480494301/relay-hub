@@ -125,3 +125,35 @@ python -m relayhub.gateway users ls                    # 列出用户 / 角色 /
 
 - `relayhub` 预设：模型 `/v1/models`、余额 `/v1/usage`（`quota - used`，单位「点」）
 - `newapi` 预设：模型 `/v1/models`、余额 `/v1/dashboard/billing/subscription`
+
+
+## 模型指纹（同名换后端检测）
+
+上游常改「同一个模型 id 背后的能力/倍率」：上下文缩水、多模态被砍、倍率翻倍。
+网关按渠道对 `/v1/models` 做**清单指纹**（`id / context_window / max_output_tokens /
+modalities / ratio / completion_ratio` 规范化后 sha256 前 16 位），只比对元数据，
+**不调模型、不花 token**。
+
+| 接口 | 作用 |
+|---|---|
+| `GET /api/fingerprint` | 上次扫描的基线（按渠道） |
+| `POST /api/fingerprint/scan` | 拉全池渠道的清单，返回 `added / removed / changed` 与 `notable` |
+
+`changed` 专指「id 没变但字段变了」——这是最值得提醒的一类。
+基线存 `pool.json` 同目录的 `fingerprints.json`；首次扫描只建立基线（`first_seen: true`）。
+
+
+## 模型指纹（同名换后端检测）
+
+上游常改「同一个模型 id 背后的能力/倍率」：上下文缩水、多模态被砍、倍率翻倍。
+网关按渠道对 `/v1/models` 做**清单指纹**（`id / context_window / max_output_tokens /
+modalities / ratio / completion_ratio` 规范化后 sha256 前 16 位），只比对元数据，
+**不调模型、不花 token**。
+
+| 接口 | 作用 |
+|---|---|
+| `GET /api/fingerprint` | 上次扫描的基线（按渠道） |
+| `POST /api/fingerprint/scan` | 拉全池渠道的清单，返回 `added / removed / changed` 与 `notable` |
+
+`changed` 专指「id 没变但字段变了」——这是最值得提醒的一类。
+基线存 `pool.json` 同目录的 `fingerprints.json`；首次扫描只建立基线（`first_seen: true`）。

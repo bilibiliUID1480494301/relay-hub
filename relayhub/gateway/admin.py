@@ -40,6 +40,7 @@ from . import reqlog as reqlog_module
 from . import toip as toip_module
 from . import newapi as newapi_module
 from . import providers as providers_module
+from .. import fingerprint as fingerprint_module
 from .. import pricing as pricing_module
 from . import features as features_module
 from . import site as site_module
@@ -484,6 +485,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             "/api/policy": lambda: self.server.policy.state(),
             "/api/features": lambda: features_module.load(paths.features_path()),
             "/api/providers": providers_module.catalog,
+            "/api/fingerprint": lambda: fingerprint_module.Store(
+                self.pool_path.with_name("fingerprints.json")
+            ).state,
         }
         if path in read_routes:
             if not self._authorized():
@@ -518,12 +522,16 @@ class AdminHandler(BaseHTTPRequestHandler):
         known = parts[:2] in (
             ["api", "keys"], ["api", "tokens"],
             ["api", "users"], ["api", "codes"], ["api", "policy"],
-            ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"],
+            ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"], ["api", "fingerprint"],
         ) or parts in (
             ["api", "settings"], ["api", "webui"],
         )
         if not known:
             self._error(404, f"未知路径 {self.path.split('?')[0]}")
+            return
+
+        if parts == ["api", "fingerprint"] and method == "POST":
+            self._fingerprint_scan()
             return
 
         if parts == ["api", "pricing"] and method == "POST":
@@ -1293,6 +1301,27 @@ class AdminHandler(BaseHTTPRequestHandler):
             "channels": asdict(pool.totals()),
             "tokens": TokenPool.load(self.server.tokens_path).stats()["tokens"],  # type: ignore[attr-defined]
         }
+
+    def _fingerprint_scan(self) -> None:
+        """扫描各渠道的模型清单，比对上次指纹，返回变动（同名换后端/加删模型）。"""
+        pool = KeyPool.load(self.pool_path)
+        keys = getattr(pool, "keys", [])
+        if callable(keys):
+            keys = keys()
+        targets = [
+            {"key_id": k.key_id, "base_url": k.base_url, "api_key": k.api_key}
+            for k in keys
+        ]
+        store = fingerprint_module.Store(self.pool_path.with_name("fingerprints.json"))
+        results = fingerprint_module.scan(store, targets)
+        store.save()
+        notable = [r for r in results if r.get("added") or r.get("removed") or r.get("changed")]
+        audit_module.record(
+            "fingerprint.scan",
+            path=self.server.audit_path,  # type: ignore[attr-defined]
+            count=str(len(results)),
+        )
+        self._send_json(200, {"ok": True, "results": results, "notable": notable})
 
     def _pricing(self) -> None:
         """拉上游 /api/pricing（new-api / relay-hub）并整理成模型×倍率×分组。"""

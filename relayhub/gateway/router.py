@@ -30,21 +30,59 @@ from .pool import PROTOCOL_ANTHROPIC
 from .upstream import UpstreamError, call_embeddings
 
 
-def public_failure_reason(detail: str) -> str:
-    """把上游错误归成一句能安全外发的话（不带原文、不带凭证）。"""
-    match = re.search(r"HTTP\s*(\d{3})", str(detail or ""))
-    code = int(match.group(1)) if match else 0
-    if code in (401, 403):
-        return "上游鉴权失败（渠道凭据可能已失效）"
+def classify_upstream_error(detail: str) -> tuple[int, str, str]:
+    """上游错误 → (回给客户端的 status, 机器可读 code, 人话)。
+
+    分清**谁的错**：400/413 是请求本身有问题（客户端可修正），不该一律 502；
+    额度耗尽与限流都是 429，但处置不同（换渠道 vs 等一会儿）。
+    """
+    text = str(detail or "")
+    low = text.lower()
+    m = re.search(r"HTTP\s*(\d{3})", text)
+    code = int(m.group(1)) if m else 0
+
+    if code == 0 or re.search(r"timeout|timed out|连接上游失败|connection", low):
+        return 504, "upstream_timeout", "上游超时或无法连接，请稍后重试"
+    if code in (401, 403) or "invalid_api_key" in low or "invalid api key" in low:
+        return 502, "upstream_auth", "上游鉴权失败（渠道凭据可能已失效）"
     if code == 429:
-        return "上游限流，请稍后重试"
+        if re.search(r"insufficient_quota|quota|balance|余额|额度|欠费", low):
+            return 502, "upstream_quota", "上游额度已耗尽，请联系管理员"
+        return 429, "upstream_rate_limit", "上游限流，请稍后重试"
+    if "context_length" in low or "too many tokens" in low or "maximum context" in low:
+        return 400, "context_too_long", "请求超出模型上下文长度，请缩短后重试"
+    if "content_filter" in low or "content policy" in low:
+        return 400, "content_filtered", "内容被上游安全策略拦截"
+    if "model_not_found" in low or (code == 404 and "model" in low):
+        return 404, "upstream_model_missing", "上游没有该模型"
+    if code == 413:
+        return 413, "payload_too_large", "请求体过大"
+    if code == 400:
+        return 400, "upstream_bad_request", "上游拒绝该请求（参数或内容不合法）"
     if code == 404:
-        return "上游没有该模型或接口"
+        return 502, "upstream_endpoint", "上游接口不存在（渠道配置可能过时）"
+    if code == 408:
+        return 504, "upstream_timeout", "上游超时"
+    if code == 529 or "overloaded" in low:
+        return 503, "upstream_overloaded", "上游过载，请稍后重试"
     if code >= 500:
-        return "上游服务不可用"
-    if code == 0:
-        return "无法连接上游"
-    return f"上游返回 HTTP {code}"
+        return 502, "upstream_server", "上游服务异常"
+    return 502, "upstream_error", "上游请求失败"
+
+
+def public_failure_reason(detail: str) -> str:
+    return classify_upstream_error(detail)[2]
+
+
+def all_failed(attempts: list[str], last: object) -> "RouterError":
+    status, code, message = classify_upstream_error(str(last))
+    return RouterError(
+        f"全部 {len(attempts)} 个渠道都失败：{message}",
+        attempts,
+        status=status,
+        detail=str(last),
+        code=code,
+    )
 
 
 class RouterError(RuntimeError):
@@ -60,12 +98,14 @@ class RouterError(RuntimeError):
         attempts: list[str] | None = None,
         status: int = 502,
         detail: str = "",
+        code: str = "",
     ) -> None:
         super().__init__(message)
         self.attempts = attempts or []
         self.status = status
         # 上游原始错误：**只给服务端日志**，绝不回给下游（上游可能回显我们的凭证）。
         self.detail = detail
+        self.code = code
 
 
 @dataclass
@@ -232,8 +272,7 @@ class KeyPoolRouter:
                 attempts=attempts,
             )
         raise RouterError(
-            f"全部 {len(attempts)} 个渠道都失败：{public_failure_reason(last)}",
-            attempts,
+            all_failed(attempts, last),
             detail=str(last),
         )
 
@@ -285,7 +324,7 @@ class KeyPoolRouter:
                 data["model"] = model  # 响应里的模型名翻回对外名
             return data, key.label, tokens_in
         raise RouterError(
-            f"全部 {len(attempts)} 个渠道都失败：{public_failure_reason(last)}", attempts
+            all_failed(attempts, last)
         )
 
     # -- 内部 ------------------------------------------------------------
