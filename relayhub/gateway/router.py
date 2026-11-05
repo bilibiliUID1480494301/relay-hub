@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -29,6 +30,23 @@ from .pool import PROTOCOL_ANTHROPIC
 from .upstream import UpstreamError, call_embeddings
 
 
+def public_failure_reason(detail: str) -> str:
+    """把上游错误归成一句能安全外发的话（不带原文、不带凭证）。"""
+    match = re.search(r"HTTP\s*(\d{3})", str(detail or ""))
+    code = int(match.group(1)) if match else 0
+    if code in (401, 403):
+        return "上游鉴权失败（渠道凭据可能已失效）"
+    if code == 429:
+        return "上游限流，请稍后重试"
+    if code == 404:
+        return "上游没有该模型或接口"
+    if code >= 500:
+        return "上游服务不可用"
+    if code == 0:
+        return "无法连接上游"
+    return f"上游返回 HTTP {code}"
+
+
 class RouterError(RuntimeError):
     """无可用渠道。status 区分「客户端要了个不存在的模型」和「上游全挂了」。
 
@@ -36,10 +54,18 @@ class RouterError(RuntimeError):
     所有渠道故障才是 502/503（上游的错）。混成一个会让排查方向完全跑偏。
     """
 
-    def __init__(self, message: str, attempts: list[str] | None = None, status: int = 502) -> None:
+    def __init__(
+        self,
+        message: str,
+        attempts: list[str] | None = None,
+        status: int = 502,
+        detail: str = "",
+    ) -> None:
         super().__init__(message)
         self.attempts = attempts or []
         self.status = status
+        # 上游原始错误：**只给服务端日志**，绝不回给下游（上游可能回显我们的凭证）。
+        self.detail = detail
 
 
 @dataclass
@@ -205,7 +231,11 @@ class KeyPoolRouter:
                 status=429,
                 attempts=attempts,
             )
-        raise RouterError(f"全部 {len(attempts)} 个渠道都失败，最后一个错误：{last}", attempts)
+        raise RouterError(
+            f"全部 {len(attempts)} 个渠道都失败：{public_failure_reason(last)}",
+            attempts,
+            detail=str(last),
+        )
 
     def relay_embeddings(
         self,
@@ -255,7 +285,7 @@ class KeyPoolRouter:
                 data["model"] = model  # 响应里的模型名翻回对外名
             return data, key.label, tokens_in
         raise RouterError(
-            f"全部 {len(attempts)} 个渠道都失败，最后一个错误：{last}", attempts
+            f"全部 {len(attempts)} 个渠道都失败：{public_failure_reason(last)}", attempts
         )
 
     # -- 内部 ------------------------------------------------------------

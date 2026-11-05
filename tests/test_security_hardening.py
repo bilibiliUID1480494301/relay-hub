@@ -77,3 +77,27 @@ def test_conformance_stops_at_done_without_closing():
     srv.close()
     assert any(b"[DONE]" in line for line in lines)
     assert elapsed < 5, f"读到哨兵后应立即返回，实际 {elapsed:.1f}s"
+
+
+def test_upstream_error_text_never_reaches_downstream():
+    from relayhub.gateway.router import RouterError, public_failure_reason
+
+    reason = public_failure_reason('HTTP 401: {"error":"bad key: Bearer sk-canary998877"}')
+    assert "sk-canary" not in reason
+    assert "鉴权" in reason
+
+    err = RouterError("全部 1 个渠道都失败", ["ch"], detail="HTTP 401: sk-canary998877")
+    assert "sk-canary" not in str(err)
+    assert "sk-canary" in err.detail   # 只进服务端日志
+
+
+def test_upstream_error_text_never_reaches_downstream():
+    from relayhub.gateway.router import RouterError, public_failure_reason
+
+    reason = public_failure_reason('HTTP 401: {"error":"bad key: Bearer sk-canary998877"}')
+    assert "sk-canary" not in reason
+    assert "鉴权" in reason
+
+    err = RouterError("全部 1 个渠道都失败", ["ch"], detail="HTTP 401: sk-canary998877")
+    assert "sk-canary" not in str(err)
+    assert "sk-canary" in err.detail   # 只进服务端日志

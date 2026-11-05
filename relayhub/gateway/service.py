@@ -2768,7 +2768,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._error(exc.status, str(exc), kind, dialect)
             self._log_request(
                 started=started, dialect=dialect, model=model, identity=identity,
-                ok=False, status=exc.status, reason=str(exc)[:120],
+                ok=False, status=exc.status, reason=(getattr(exc, "detail", "") or str(exc))[:200],
             )
             return
         self._send_json(200, data)
@@ -2901,7 +2901,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._error(exc.status, str(exc), kind, dialect)
             self._log_request(
                 started=started, dialect=dialect, model=model, identity=identity,
-                ok=False, status=exc.status, reason=str(exc)[:120],
+                ok=False, status=exc.status, reason=(getattr(exc, "detail", "") or str(exc))[:200],
             )
             return
 
