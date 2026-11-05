@@ -54,11 +54,15 @@ _FINISH_REASON_MAP = {
 class UpstreamError(RuntimeError):
     """上游调用失败。retryable 决定是否计入熔断。"""
 
-    def __init__(self, status: int, message: str, retryable: bool) -> None:
+    def __init__(
+        self, status: int, message: str, retryable: bool, retry_after: int | None = None
+    ) -> None:
         super().__init__(f"HTTP {status}: {message}" if status else message)
         self.status = status
         self.detail = message
         self.retryable = retryable
+        # 上游限流/过载时给的退避秒数，原样透传给下游（别让客户端瞎重试）。
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -205,6 +209,21 @@ _SECRET_RE = re.compile(
 def scrub_secrets(text: str) -> str:
     """上游错误体可能回显我们发过去的凭证，绝不能原样带给下游。"""
     return _SECRET_RE.sub("***", text)
+
+
+def _retry_after(response: Any) -> int | None:
+    """解析 Retry-After（只认秒数；HTTP-date 形式放弃，宁可不下发也别给错值）。"""
+    try:
+        header = response.getheader("Retry-After")
+    except (AttributeError, OSError):
+        return None
+    if not header:
+        return None
+    try:
+        value = int(str(header).strip())
+    except ValueError:
+        return None
+    return value if 0 <= value <= 86400 else None
 
 
 def _read_error(response: Any) -> str:
@@ -764,7 +783,12 @@ def call_once(
         connection.request("POST", url, body=body, headers=headers)
         response = connection.getresponse()
         if response.status != 200:
-            raise UpstreamError(response.status, _read_error(response), _retryable(response.status))
+            raise UpstreamError(
+                response.status,
+                _read_error(response),
+                _retryable(response.status),
+                _retry_after(response),
+            )
         raw = response.read()
     except (OSError, ssl.SSLError) as exc:
         connpool.mark_dead(connection)
@@ -828,7 +852,10 @@ def call_embeddings(
         response = connection.getresponse()
         if response.status != 200:
             raise UpstreamError(
-                response.status, _read_error(response), _retryable(response.status)
+                response.status,
+                _read_error(response),
+                _retryable(response.status),
+                _retry_after(response),
             )
         raw = response.read()
     except (OSError, ssl.SSLError) as exc:
@@ -895,7 +922,12 @@ def _stream_anthropic(
         connection.request("POST", url, body=body, headers=headers)
         response = connection.getresponse()
         if response.status != 200:
-            raise UpstreamError(response.status, _read_error(response), _retryable(response.status))
+            raise UpstreamError(
+                response.status,
+                _read_error(response),
+                _retryable(response.status),
+                _retry_after(response),
+            )
 
         current_event: str | None = None
         data_lines: list[str] = []
@@ -988,7 +1020,12 @@ def _stream_openai_as_anthropic(
         connection.request("POST", url, body=body, headers=headers)
         response = connection.getresponse()
         if response.status != 200:
-            raise UpstreamError(response.status, _read_error(response), _retryable(response.status))
+            raise UpstreamError(
+                response.status,
+                _read_error(response),
+                _retryable(response.status),
+                _retry_after(response),
+            )
 
         yield (
             "message_start",

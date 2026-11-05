@@ -1127,6 +1127,10 @@ class RelayHandler(BaseHTTPRequestHandler):
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self._echo_request_id()
+        pending = getattr(self, "_pending_retry_after", None)
+        if pending:
+            self.send_header("Retry-After", str(int(pending)))
+            self._pending_retry_after = None
         self.send_header("Content-Type", "application/json; charset=utf-8")
         if cookie:
             self._set_cookie_header(cookie, cookie_max_age)
@@ -1566,14 +1570,17 @@ class RelayHandler(BaseHTTPRequestHandler):
         message: str,
         kind: str = "invalid_request_error",
         dialect: str = "anthropic",
+        code: str | None = None,
+        retry_after: int | None = None,
     ) -> None:
         """两种客户端对错误体的形状要求不一样，别互相糊。
 
         Anthropic：{"type":"error","error":{"type":...,"message":...}}
         OpenAI   ：{"error":{"message":...,"type":...,"code":...}}
         """
+        self._pending_retry_after = retry_after
         if dialect in ("openai", "responses"):
-            self._send_json(status, {"error": {"message": message, "type": kind, "code": None}})
+            self._send_json(status, {"error": {"message": message, "type": kind, "code": code}})
         else:
             self._send_json(status, {"type": "error", "error": {"type": kind, "message": message}})
 
@@ -2765,7 +2772,8 @@ class RelayHandler(BaseHTTPRequestHandler):
         except RouterError as exc:
             kind = "not_found_error" if exc.status == 404 else "api_error"
             self._record(identity, False)
-            self._error(exc.status, str(exc), kind, dialect)
+            self._error(exc.status, str(exc), kind, dialect, code=getattr(exc, "code", None) or None,
+                retry_after=getattr(exc, "retry_after", None),)
             self._log_request(
                 started=started, dialect=dialect, model=model, identity=identity,
                 ok=False, status=exc.status, reason=(getattr(exc, "detail", "") or str(exc))[:200],
@@ -2898,7 +2906,8 @@ class RelayHandler(BaseHTTPRequestHandler):
                 self.users.settle(identity.user_id, pre, 0)  # 上游失败：预扣全退
             kind = "not_found_error" if exc.status == 404 else "api_error"
             self._record(identity, False)
-            self._error(exc.status, str(exc), kind, dialect)
+            self._error(exc.status, str(exc), kind, dialect, code=getattr(exc, "code", None) or None,
+                retry_after=getattr(exc, "retry_after", None),)
             self._log_request(
                 started=started, dialect=dialect, model=model, identity=identity,
                 ok=False, status=exc.status, reason=(getattr(exc, "detail", "") or str(exc))[:200],

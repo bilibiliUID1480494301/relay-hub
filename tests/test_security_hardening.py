@@ -101,3 +101,72 @@ def test_upstream_error_text_never_reaches_downstream():
     err = RouterError("全部 1 个渠道都失败", ["ch"], detail="HTTP 401: sk-canary998877")
     assert "sk-canary" not in str(err)
     assert "sk-canary" in err.detail   # 只进服务端日志
+
+
+def test_classify_priority_is_deterministic():
+    from relayhub.gateway.router import classify_upstream_error as c
+
+    assert c("HTTP 401: 429 rate limited")[1] == "upstream_auth"      # 状态码大类优先
+    assert c("HTTP 429: model not found")[1] in ("upstream_quota", "upstream_rate_limit")
+    assert c("HTTP 429: insufficient_quota")[1] == "upstream_quota"
+    assert c("HTTP 404: model xyz not found")[1] == "upstream_model_missing"
+    assert c("HTTP 404: not found")[1] == "upstream_endpoint"         # 无关键词 → 配置问题
+    assert c("HTTP 400: bad parameter")[1] == "bad_request"           # 请求问题不带 upstream 前缀
+    assert c("HTTP 529")[1] == "upstream_overloaded"
+    assert c("连接上游失败: timeout")[1] == "upstream_timeout"
+
+
+def test_downstream_error_body_carries_code_and_no_detail():
+    from relayhub.gateway.router import all_failed
+
+    err = all_failed(["ch-1"], "HTTP 401: bad key sk-canary")
+    assert err.code == "upstream_auth" and err.status == 502
+    assert "sk-canary" not in str(err)
+    assert "ch-1" not in str(err)          # 不泄露渠道名
+    assert "HTTP" not in str(err)          # 不泄露上游状态细节
+
+
+def test_retry_after_only_accepts_seconds():
+    from relayhub.gateway.upstream import _retry_after
+
+    class R:
+        def __init__(self, v):
+            self.v = v
+        def getheader(self, name):
+            return self.v
+
+    assert _retry_after(R("30")) == 30
+    assert _retry_after(R("0")) == 0
+    assert _retry_after(R(None)) is None
+    assert _retry_after(R("Wed, 21 Oct 2026 07:28:00 GMT")) is None   # HTTP-date 不猜
+    assert _retry_after(R("999999")) is None
+
+
+def test_only_retry_after_header_is_read():
+    """上游响应头里可能有价格/账号信息，只能读 Retry-After 这一项。"""
+    from relayhub.gateway.upstream import _retry_after
+
+    seen = []
+
+    class R:
+        def getheader(self, name):
+            seen.append(name)
+            return "30" if name.lower() == "retry-after" else "x-upstream-price: 100"
+
+    assert _retry_after(R()) == 30
+    assert seen == ["Retry-After"]          # 不遍历、不复制其它头
+
+
+def test_only_retry_after_header_is_read():
+    """上游响应头里可能有价格/账号信息，只能读 Retry-After 这一项。"""
+    from relayhub.gateway.upstream import _retry_after
+
+    seen = []
+
+    class R:
+        def getheader(self, name):
+            seen.append(name)
+            return "30" if name.lower() == "retry-after" else "x-upstream-price: 100"
+
+    assert _retry_after(R()) == 30
+    assert seen == ["Retry-After"]          # 不遍历、不复制其它头

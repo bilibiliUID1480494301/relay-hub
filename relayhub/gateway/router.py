@@ -31,41 +31,60 @@ from .upstream import UpstreamError, call_embeddings
 
 
 def classify_upstream_error(detail: str) -> tuple[int, str, str]:
-    """上游错误 → (回给客户端的 status, 机器可读 code, 人话)。
+    """上游错误 → (客户端 status, code, 人话)。
 
-    分清**谁的错**：400/413 是请求本身有问题（客户端可修正），不该一律 502；
-    额度耗尽与限流都是 429，但处置不同（换渠道 vs 等一会儿）。
+    规则**写死并有序**（命中即停），不要让关键词互相抢：
+      1) 连不上/超时        → 504 upstream_timeout
+      2) 401/403            → 502 upstream_auth        （状态码优先，body 里有 429 字样也不改判）
+      3) 429                → quota > rate_limit       （只在 429 内部比关键词）
+      4) 400/404/413        → quota > auth > model > 其它
+      5) 5xx / 529          → upstream_server / overloaded
+    关键词只在 400/404/429 这三个「语义模糊」的状态码上参与细分。
     """
     text = str(detail or "")
     low = text.lower()
     m = re.search(r"HTTP\s*(\d{3})", text)
-    code = int(m.group(1)) if m else 0
+    status = int(m.group(1)) if m else 0
 
-    if code == 0 or re.search(r"timeout|timed out|连接上游失败|connection", low):
+    if status == 0:
         return 504, "upstream_timeout", "上游超时或无法连接，请稍后重试"
-    if code in (401, 403) or "invalid_api_key" in low or "invalid api key" in low:
+    if status in (401, 403):
         return 502, "upstream_auth", "上游鉴权失败（渠道凭据可能已失效）"
-    if code == 429:
-        if re.search(r"insufficient_quota|quota|balance|余额|额度|欠费", low):
+
+    def has(*words: str) -> bool:
+        return any(w in low for w in words)
+
+    if status == 429:
+        if has("insufficient_quota", "quota", "balance", "余额", "额度", "欠费"):
             return 502, "upstream_quota", "上游额度已耗尽，请联系管理员"
         return 429, "upstream_rate_limit", "上游限流，请稍后重试"
-    if "context_length" in low or "too many tokens" in low or "maximum context" in low:
-        return 400, "context_too_long", "请求超出模型上下文长度，请缩短后重试"
-    if "content_filter" in low or "content policy" in low:
-        return 400, "content_filtered", "内容被上游安全策略拦截"
-    if "model_not_found" in low or (code == 404 and "model" in low):
-        return 404, "upstream_model_missing", "上游没有该模型"
-    if code == 413:
-        return 413, "payload_too_large", "请求体过大"
-    if code == 400:
-        return 400, "upstream_bad_request", "上游拒绝该请求（参数或内容不合法）"
-    if code == 404:
+
+    if status in (400, 404, 413):
+        # 顺序：quota > auth > model > context/content > 兜底
+        if has("insufficient_quota", "quota", "balance", "余额", "额度", "欠费"):
+            return 502, "upstream_quota", "上游额度已耗尽，请联系管理员"
+        if has("invalid_api_key", "invalid api key", "unauthorized", "authentication"):
+            return 502, "upstream_auth", "上游鉴权失败（渠道凭据可能已失效）"
+        if has("model_not_found", "model not found", "no such model", "unknown model") or re.search(
+            r"model\s+\S*\s*not\s+found", low
+        ):
+            return 502, "upstream_model_missing", "上游没有该模型（渠道映射可能过时）"
+        if has("context_length", "too many tokens", "maximum context"):
+            return 400, "context_too_long", "请求超出模型上下文长度，请缩短后重试"
+        if has("content_filter", "content policy"):
+            return 400, "content_filtered", "内容被上游安全策略拦截"
+        if status == 413:
+            return 413, "payload_too_large", "请求体过大"
+        if status == 400:
+            return 400, "bad_request", "上游拒绝该请求（参数或内容不合法）"
+        # 404 且没有 model 关键词：接口/路径问题，归配置
         return 502, "upstream_endpoint", "上游接口不存在（渠道配置可能过时）"
-    if code == 408:
+
+    if status == 408:
         return 504, "upstream_timeout", "上游超时"
-    if code == 529 or "overloaded" in low:
+    if status == 529 or has("overloaded"):
         return 503, "upstream_overloaded", "上游过载，请稍后重试"
-    if code >= 500:
+    if status >= 500:
         return 502, "upstream_server", "上游服务异常"
     return 502, "upstream_error", "上游请求失败"
 
@@ -82,6 +101,7 @@ def all_failed(attempts: list[str], last: object) -> "RouterError":
         status=status,
         detail=str(last),
         code=code,
+        retry_after=getattr(last, "retry_after", None),
     )
 
 
@@ -99,6 +119,7 @@ class RouterError(RuntimeError):
         status: int = 502,
         detail: str = "",
         code: str = "",
+        retry_after: int | None = None,
     ) -> None:
         super().__init__(message)
         self.attempts = attempts or []
@@ -106,6 +127,7 @@ class RouterError(RuntimeError):
         # 上游原始错误：**只给服务端日志**，绝不回给下游（上游可能回显我们的凭证）。
         self.detail = detail
         self.code = code
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -271,10 +293,7 @@ class KeyPoolRouter:
                 status=429,
                 attempts=attempts,
             )
-        raise RouterError(
-            all_failed(attempts, last),
-            detail=str(last),
-        )
+        raise all_failed(attempts, last)
 
     def relay_embeddings(
         self,
@@ -323,9 +342,7 @@ class KeyPoolRouter:
             if isinstance(data.get("model"), str):
                 data["model"] = model  # 响应里的模型名翻回对外名
             return data, key.label, tokens_in
-        raise RouterError(
-            all_failed(attempts, last)
-        )
+        raise all_failed(attempts, last)
 
     # -- 内部 ------------------------------------------------------------
 
