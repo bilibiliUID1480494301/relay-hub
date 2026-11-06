@@ -833,6 +833,20 @@ def _apply_panel_theme(html: str) -> str:
     return html.replace("__THEME_BG__", _panel_bg_css(), 1)
 
 
+ANNOUNCEMENT_SCRIPT = """<script>
+fetch('/api/announcement').then(function(r){return r.json();}).then(function(a){
+  if(!a || !a.text) return;
+  var colors={info:'#2563eb',warning:'#d97706',critical:'#dc2626'};
+  var bar=document.createElement('div');
+  bar.textContent=a.text;
+  bar.setAttribute('role','status');
+  bar.style.cssText='position:fixed;top:0;left:0;right:0;z-index:9999;padding:10px 16px;'
+    +'text-align:center;font-size:14px;line-height:1.4;color:#fff;background:'
+    +(colors[a.level]||colors.info)+';box-shadow:0 1px 6px rgba(0,0,0,.15)';
+  document.body.prepend(bar);
+}).catch(function(){});
+</script>"""
+
 PANEL_HTML = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__SITE__ 用户面板</title>
@@ -1579,8 +1593,12 @@ class RelayHandler(BaseHTTPRequestHandler):
         OpenAI   ：{"error":{"message":...,"type":...,"code":...}}
         """
         self._pending_retry_after = retry_after
+        rid = getattr(self, "_current_request_id", "")
         if dialect in ("openai", "responses"):
-            self._send_json(status, {"error": {"message": message, "type": kind, "code": code}})
+            self._send_json(
+                status,
+                {"error": {"message": message, "type": kind, "code": code, "request_id": rid}},
+            )
         else:
             self._send_json(status, {"type": "error", "error": {"type": kind, "message": message}})
 
@@ -2053,8 +2071,34 @@ class RelayHandler(BaseHTTPRequestHandler):
             # 刻意不泄露版本号与模型信息——探活只需要知道"活着"。
             self._send_json(200, {"ok": True, "server": "relay-hub"})
             return
+        if path == "/api/announcement":
+            # 公开：面板/落地页要在未登录时也能看到维护公告。
+            config = site_module.load_site(paths.site_path())
+            active = site_module.announcement_active(config)
+            self._send_json(
+                200,
+                {
+                    "text": config.announcement if active else "",
+                    "level": config.announcement_level,
+                    "until": config.announcement_until,
+                },
+            )
+            return
+        if path == "/api/announcement":
+            # 公开端点：面板/落地页都要能读到公告，不需要凭证；过期自动为空。
+            site_config = site_module.load_site(paths.site_path())
+            active = site_module.announcement_active(site_config)
+            self._send_json(
+                200,
+                {
+                    "text": site_config.announcement if active else "",
+                    "level": site_config.announcement_level,
+                    "until": site_config.announcement_until,
+                },
+            )
+            return
         if path == "/panel":
-            self._send_html(_apply_panel_theme(PANEL_HTML))
+            self._send_html(_apply_panel_theme(PANEL_HTML) + ANNOUNCEMENT_SCRIPT)
             return
         if path == "/api/user/me":
             user = self._session_user()

@@ -53,3 +53,23 @@ def test_admin_fingerprint_endpoints(tmp_path):
             assert json.loads(r.read()) == {}
     finally:
         srv.shutdown(); srv.server_close()
+
+
+def test_announcement_roundtrip_and_expiry(tmp_path):
+    import time
+    from relayhub.gateway import site
+
+    path = tmp_path / "site.json"
+    site.save_site(path, "名", announcement="今晚 22:00 维护", announcement_until=int(time.time()) + 60, announcement_level="warning")
+    loaded = site.load_site(path)
+    assert loaded.announcement == "今晚 22:00 维护"
+    assert loaded.announcement_level == "warning"
+    assert site.announcement_active(loaded) is True
+
+    # 改名不该把公告抹掉
+    site.save_site(path, "新名")
+    again = site.load_site(path)
+    assert again.name == "新名" and again.announcement == "今晚 22:00 维护"
+
+    again.announcement_until = int(time.time()) - 1
+    assert site.announcement_active(again) is False

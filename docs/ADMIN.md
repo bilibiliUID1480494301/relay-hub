@@ -157,3 +157,45 @@ modalities / ratio / completion_ratio` 规范化后 sha256 前 16 位），只�
 
 `changed` 专指「id 没变但字段变了」——这是最值得提醒的一类。
 基线存 `pool.json` 同目录的 `fingerprints.json`；首次扫描只建立基线（`first_seen: true`）。
+
+
+## 全站公告
+
+| 接口 | 说明 |
+|---|---|
+| `POST /api/announcement`（管理员） | `{"text":"…","until":<epoch 秒>,"level":"info|warning|critical"}`；`text` 传空即清除 |
+| `GET /api/announcement` | **无需凭证**，面板/落地页读；过期后 `text` 自动为空 |
+
+`until=0` 表示长期有效。写入 `site.json`，与站点名共用一份配置；**改名不会清掉公告**。
+用户面板加载时会在顶部插入横幅（`textContent` 赋值，不拼 HTML）。
+
+## 错误里的日志编号
+
+所有错误响应体带 `request_id`，与响应头 `X-Request-ID`、`/api/requests` 里的 `req_id` 一致：
+
+```json
+{"error":{"message":"…","type":"api_error","code":"upstream_rate_limit","request_id":"req_9f2c…"}}
+```
+
+用户报障时贴这一串即可定位；不需要让他们翻响应头。
+
+
+## 全站公告
+
+| 接口 | 说明 |
+|---|---|
+| `POST /api/announcement`（管理员） | `{"text":"…","until":<epoch 秒>,"level":"info|warning|critical"}`；`text` 传空即清除 |
+| `GET /api/announcement` | **无需凭证**，面板/落地页读；过期后 `text` 自动为空 |
+
+`until=0` 表示长期有效。写入 `site.json`，与站点名共用一份配置；**改名不会清掉公告**。
+用户面板加载时会在顶部插入横幅（`textContent` 赋值，不拼 HTML）。
+
+## 错误里的日志编号
+
+所有错误响应体带 `request_id`，与响应头 `X-Request-ID`、`/api/requests` 里的 `req_id` 一致：
+
+```json
+{"error":{"message":"…","type":"api_error","code":"upstream_rate_limit","request_id":"req_9f2c…"}}
+```
+
+用户报障时贴这一串即可定位；不需要让他们翻响应头。

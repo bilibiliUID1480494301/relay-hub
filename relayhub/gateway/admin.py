@@ -41,6 +41,7 @@ from . import toip as toip_module
 from . import newapi as newapi_module
 from . import providers as providers_module
 from .. import fingerprint as fingerprint_module
+from . import site as site_module
 from .. import pricing as pricing_module
 from . import features as features_module
 from . import site as site_module
@@ -485,6 +486,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             "/api/policy": lambda: self.server.policy.state(),
             "/api/features": lambda: features_module.load(paths.features_path()),
             "/api/providers": providers_module.catalog,
+            "/api/announcement": lambda: _announcement_payload(),
             "/api/fingerprint": lambda: fingerprint_module.Store(
                 self.pool_path.with_name("fingerprints.json")
             ).state,
@@ -522,12 +524,16 @@ class AdminHandler(BaseHTTPRequestHandler):
         known = parts[:2] in (
             ["api", "keys"], ["api", "tokens"],
             ["api", "users"], ["api", "codes"], ["api", "policy"],
-            ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"], ["api", "fingerprint"],
+            ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"], ["api", "fingerprint"], ["api", "announcement"],
         ) or parts in (
             ["api", "settings"], ["api", "webui"],
         )
         if not known:
             self._error(404, f"未知路径 {self.path.split('?')[0]}")
+            return
+
+        if parts == ["api", "announcement"] and method == "POST":
+            self._set_announcement()
             return
 
         if parts == ["api", "fingerprint"] and method == "POST":
@@ -1302,6 +1308,20 @@ class AdminHandler(BaseHTTPRequestHandler):
             "tokens": TokenPool.load(self.server.tokens_path).stats()["tokens"],  # type: ignore[attr-defined]
         }
 
+    def _set_announcement(self) -> None:
+        """发布/清除全站公告。text 为空即清除。"""
+        body = self._read_json() or {}
+        current = site_module.load_site(paths.site_path())
+        site_module.save_site(
+            paths.site_path(),
+            current.name,
+            announcement=str(body.get("text") or ""),
+            announcement_until=int(body.get("until") or 0),
+            announcement_level=str(body.get("level") or "info"),
+        )
+        audit_module.record("site.announcement", path=self.server.audit_path)  # type: ignore[attr-defined]
+        self._send_json(200, _announcement_payload())
+
     def _fingerprint_scan(self) -> None:
         """扫描各渠道的模型清单，比对上次指纹，返回变动（同名换后端/加删模型）。"""
         pool = KeyPool.load(self.pool_path)
@@ -1555,6 +1575,16 @@ class AdminHandler(BaseHTTPRequestHandler):
         )
         self._send_json(200, {"bg_color": color, "bg_image": image})
 
+
+
+def _announcement_payload() -> dict[str, Any]:
+    cfg = site_module.load_site(paths.site_path())
+    active = site_module.announcement_active(cfg)
+    return {
+        "text": cfg.announcement if active else "",
+        "level": cfg.announcement_level,
+        "until": cfg.announcement_until,
+    }
 
 
 class AdminServer(ThreadingHTTPServer):
