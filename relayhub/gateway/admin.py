@@ -552,6 +552,17 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, self._state())
             return
+        if path == "/api/plugin-costs":
+            if not self._authorized():
+                self._error(401, "缺少或错误的 token")
+                return
+            query = parse_qs(urlsplit(self.path).query)
+            try:
+                days = max(1, min(90, int((query.get("days") or ["7"])[0])))
+            except ValueError:
+                days = 7
+            self._send_json(200, self._plugin_costs(days))
+            return
         if path == "/api/events":
             # SSE：状态变化 + 心跳。比轮询省请求，也不需要实现 WebSocket。
             if not self._authorized():
@@ -1433,6 +1444,54 @@ class AdminHandler(BaseHTTPRequestHandler):
         )
         audit_module.record("site.announcement", path=self.server.audit_path)  # type: ignore[attr-defined]
         self._send_json(200, _announcement_payload())
+
+    def _plugin_costs(self, days: int = 7) -> dict[str, Any]:
+        """按插件聚合 pluginlogs/<plugin>/<YYYYMMDD>.jsonl。
+
+        日志里没有 cost 字段（只有 tokens_in/out），所以这里只出用量与健康度；
+        成本由客户端或调用方用价格表折算，避免网关替上游定价。
+        """
+        home = getattr(self.server, "plugin_log_home", None)
+        if home is None or not Path(home).is_dir():
+            return {"ok": True, "plugins": [], "detail": "未配置 pluginlogs 目录"}
+
+        cutoff = time.strftime("%Y%m%d", time.localtime(time.time() - days * 86400))
+        rows: dict[str, dict[str, Any]] = {}
+        for plugin_dir in sorted(Path(home).iterdir()):
+            if not plugin_dir.is_dir():
+                continue
+            entry = rows.setdefault(
+                plugin_dir.name,
+                {"plugin": plugin_dir.name, "requests": 0, "failed": 0,
+                 "tokens_in": 0, "tokens_out": 0, "latency_ms": 0.0, "version": ""},
+            )
+            for path in sorted(plugin_dir.glob("*.jsonl")):
+                if path.stem < cutoff:
+                    continue
+                try:
+                    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError:
+                    continue
+                for line in lines:
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    entry["requests"] += 1
+                    if not rec.get("ok"):
+                        entry["failed"] += 1
+                    entry["tokens_in"] += int(rec.get("tokens_in") or 0)
+                    entry["tokens_out"] += int(rec.get("tokens_out") or 0)
+                    entry["latency_ms"] += float(rec.get("latency_ms") or 0)
+                    if rec.get("plugin_version"):
+                        entry["version"] = str(rec["plugin_version"])
+        plugins = [r for r in rows.values() if r["requests"]]
+        for r in plugins:
+            r["avg_latency_ms"] = round(r["latency_ms"] / r["requests"], 1) if r["requests"] else 0.0
+            r["latency_ms"] = round(r["latency_ms"], 1)
+            r["fail_rate"] = round(r["failed"] / r["requests"] * 100, 1) if r["requests"] else 0.0
+        plugins.sort(key=lambda r: r["tokens_in"] + r["tokens_out"], reverse=True)
+        return {"ok": True, "days": days, "plugins": plugins}
 
     def _events(self) -> None:
         """SSE 推送：首帧 hello，随后状态变化与心跳；最长 2 分钟由客户端重连。"""

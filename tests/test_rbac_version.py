@@ -131,3 +131,36 @@ def test_events_streams_hello_frame(tmp_path):
         conn.close()
         srv.shutdown()
         srv.server_close()
+
+
+def test_plugin_costs_aggregate_tokens(tmp_path):
+    import json as _json
+
+    logs = tmp_path / "pluginlogs" / "demo-plugin"
+    logs.mkdir(parents=True)
+    today = time.strftime("%Y%m%d")
+    rows = [
+        {"ok": True, "tokens_in": 100, "tokens_out": 50, "latency_ms": 10.0, "plugin_version": "1.2.3"},
+        {"ok": False, "tokens_in": 0, "tokens_out": 0, "latency_ms": 30.0},
+    ]
+    (logs / f"{today}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+    )
+
+    srv = _server(tmp_path)
+    srv.plugin_log_home = tmp_path / "pluginlogs"
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        req = urllib.request.Request(base + "/api/plugin-costs?days=7")
+        req.add_header("X-Admin-Token", "t")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        item = data["plugins"][0]
+        assert item["plugin"] == "demo-plugin"
+        assert item["requests"] == 2 and item["failed"] == 1
+        assert item["tokens_in"] == 100 and item["tokens_out"] == 50
+        assert item["fail_rate"] == 50.0
+        assert item["version"] == "1.2.3"
+    finally:
+        srv.shutdown()
+        srv.server_close()
