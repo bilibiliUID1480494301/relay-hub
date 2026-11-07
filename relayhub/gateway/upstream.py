@@ -394,6 +394,11 @@ def _tool_result_content(content: Any) -> Any:
     return out
 
 
+def strip_private(payload: dict[str, Any]) -> dict[str, Any]:
+    """去掉以 _ 开头的内部字段（如 _extras）：那是 IR 的私有载体，不能发给上游。"""
+    return {k: v for k, v in payload.items() if not k.startswith("_")}
+
+
 def to_openai_request(payload: dict[str, Any]) -> dict[str, Any]:
     """Anthropic Messages 请求 → OpenAI Chat Completions 请求（含 tools/tool_use/tool_result 互译）。"""
     messages: list[dict[str, Any]] = []
@@ -769,6 +774,7 @@ def call_once(
         except gemini_api.GeminiApiError as exc:
             raise UpstreamError(exc.status, exc.detail, _retryable(exc.status)) from exc
         return UpstreamReply(message=message, tokens_in=tokens_in, tokens_out=tokens_out)
+    payload = strip_private(payload)
     anthropic_side = key.protocol == PROTOCOL_ANTHROPIC
     path = "/messages" if anthropic_side else "/chat/completions"
     connection, url = _open(key, path, timeout)
@@ -892,6 +898,7 @@ def stream_events(
     on_usage: Callable[[int, int], None] | None = None,
     trace_headers: dict[str, str] | None = None,
 ) -> Iterator[tuple[str, dict[str, Any]]]:
+    payload = strip_private(payload)
     """产出 Anthropic 形态的 (event, payload) 序列。
 
     上游是 anthropic 协议时原样透传；是 openai 协议时边收边翻译。

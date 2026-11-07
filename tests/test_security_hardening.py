@@ -170,3 +170,12 @@ def test_only_retry_after_header_is_read():
 
     assert _retry_after(R()) == 30
     assert seen == ["Retry-After"]          # 不遍历、不复制其它头
+
+
+def test_private_ir_fields_never_reach_upstream():
+    from relayhub.gateway.upstream import strip_private
+
+    payload = {"model": "m", "messages": [], "_extras": {"seed": 1}}
+    clean = strip_private(payload)
+    assert "_extras" not in clean
+    assert clean["model"] == "m"
