@@ -43,9 +43,10 @@ def test_owner_sees_version_admin_sees_hidden(tmp_path):
         assert owner["api_compat"]
 
         srv.sessions["sid-test"] = time.time() + 300
-        admin = _state(base, {"Cookie": f"{SESSION_COOKIE}=sid-test"})
-        assert admin["version"] == "hidden"
-        assert admin["api_compat"]          # 兼容标识所有已认证用户可读
+        # 会话来自 admin token，因此也是 owner
+        session = _state(base, {"Cookie": f"{SESSION_COOKIE}=sid-test"})
+        assert session["version"] == __version__
+        assert session["api_compat"]        # 兼容标识所有已认证用户可读
     finally:
         srv.shutdown()
         srv.server_close()

@@ -324,7 +324,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             return True
         # 登录会话：浏览器登录一次后用 HttpOnly cookie，免去把 token 长期挂在 URL 里
         if self._session_valid():
-            self.role = "admin"   # 网页登录者：有管理权，但不是站长
+            # 会话是用 admin token 换来的（见 _login），所以同样是 owner。
+            # 真正的「非 owner 管理员」要等 users.json 账号能登录管理面之后才有。
+            self.role = "owner"
             return True
         return False
 
