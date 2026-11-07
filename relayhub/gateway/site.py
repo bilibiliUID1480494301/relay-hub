@@ -32,6 +32,7 @@ class SiteConfig:
     announcement: str = ""
     announcement_until: int = 0
     announcement_level: str = "info"   # info | warning | critical
+    announcement_public: bool = False  # 是否允许未认证访问（走 /public/announcements）
 
 
 def sanitize_name(raw: object) -> str:
@@ -70,6 +71,7 @@ def load_site(path: Path) -> SiteConfig:
         announcement=sanitize_announcement(raw.get("announcement")),
         announcement_until=int(raw.get("announcement_until") or 0),
         announcement_level=level if level in ("info", "warning", "critical") else "info",
+        announcement_public=bool(raw.get("announcement_public")),
     )
 
 
@@ -107,6 +109,7 @@ def save_site(
             "announcement": site.announcement,
             "announcement_until": site.announcement_until,
             "announcement_level": site.announcement_level,
+            "announcement_public": site.announcement_public,
         },
     )
     return site

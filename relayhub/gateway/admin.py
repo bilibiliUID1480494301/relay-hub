@@ -32,6 +32,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .. import __version__ as relayhub_version
+from .compat import API_COMPAT
 from .. import paths
 from . import atomicio
 from . import audit as audit_module
@@ -50,6 +51,7 @@ from .policy import KIND_DEVICE, KIND_IP, PolicyError, PolicyStore
 from .users import RedeemStore, UserError, UserPool, hash_password
 
 from .pool import (
+    SUPPORTED_PROTOCOLS,
     DEFAULT_TIER_DURATIONS,
     is_self_reference,
     PROTOCOL_ANTHROPIC,
@@ -307,6 +309,9 @@ class AdminHandler(BaseHTTPRequestHandler):
     def _error(self, status: int, message: str) -> None:
         self._send_json(status, {"error": message})
 
+    # 请求级角色：owner | admin。版本号只给 owner（见 _state）
+    role: str = ""
+
     def _authorized(self) -> bool:
         if not self.token:
             return True
@@ -315,9 +320,13 @@ class AdminHandler(BaseHTTPRequestHandler):
             query = parse_qs(urlsplit(self.path).query)
             supplied = (query.get("token") or [""])[0]
         if supplied and self.server._token_ok(supplied):  # type: ignore[attr-defined]
+            self.role = "owner"   # 持有管理 token 视为站长
             return True
         # 登录会话：浏览器登录一次后用 HttpOnly cookie，免去把 token 长期挂在 URL 里
-        return self._session_valid()
+        if self._session_valid():
+            self.role = "admin"   # 网页登录者：有管理权，但不是站长
+            return True
+        return False
 
     # -- 登录会话 ----------------------------------------------------------
 
@@ -417,11 +426,13 @@ class AdminHandler(BaseHTTPRequestHandler):
             "pool_path": str(self.pool_path),
             "exists": self.pool_path.is_file(),
             "site_name": site_module.load_site(paths.site_path()).name,
+            "version": relayhub_version if self.role == "owner" else "hidden",
             "strategy": pool.strategy,
             "strategies": list(STRATEGIES),
             "failure_threshold": pool.failure_threshold,
             "cooldown_tiers": pool.cooldown_tiers,
-            "protocols": [PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI_CHAT],
+            "protocols": list(SUPPORTED_PROTOCOLS),   # 别再手写清单：漏过 gemini-api
+            "api_compat": API_COMPAT,
             "totals": asdict(pool.totals()),
             "keys": [public_key(key, now) for key in pool.keys],
         }

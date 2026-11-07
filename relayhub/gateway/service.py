@@ -834,15 +834,16 @@ def _apply_panel_theme(html: str) -> str:
 
 
 ANNOUNCEMENT_SCRIPT = """<script>
-fetch('/api/announcement').then(function(r){return r.json();}).then(function(a){
-  if(!a || !a.text) return;
+fetch('/public/announcements').then(function(r){return r.json();}).then(function(a){
+  if(!a || !a.items || !a.items.length) return;
+  var a0=a.items[0];
   var colors={info:'#2563eb',warning:'#d97706',critical:'#dc2626'};
   var bar=document.createElement('div');
-  bar.textContent=a.text;
+  bar.textContent=a0.text;
   bar.setAttribute('role','status');
   bar.style.cssText='position:fixed;top:0;left:0;right:0;z-index:9999;padding:10px 16px;'
     +'text-align:center;font-size:14px;line-height:1.4;color:#fff;background:'
-    +(colors[a.level]||colors.info)+';box-shadow:0 1px 6px rgba(0,0,0,.15)';
+    +(colors[a0.level]||colors.info)+';box-shadow:0 1px 6px rgba(0,0,0,.15)';
   document.body.prepend(bar);
 }).catch(function(){});
 </script>"""
@@ -2071,8 +2072,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             # 刻意不泄露版本号与模型信息——探活只需要知道"活着"。
             self._send_json(200, {"ok": True, "server": "relay-hub"})
             return
-        if path == "/api/announcement":
-            # 公开：面板/落地页要在未登录时也能看到维护公告。
+        if path == "/public/announcements":
+            # 未认证可读，但只返回显式标记公开的公告（脱敏后）。
             config = site_module.load_site(paths.site_path())
             active = site_module.announcement_active(config)
             self._send_json(
@@ -2087,15 +2088,17 @@ class RelayHandler(BaseHTTPRequestHandler):
         if path == "/api/announcement":
             # 公开端点：面板/落地页都要能读到公告，不需要凭证；过期自动为空。
             site_config = site_module.load_site(paths.site_path())
-            active = site_module.announcement_active(site_config)
-            self._send_json(
-                200,
-                {
-                    "text": site_config.announcement if active else "",
+            active = site_module.announcement_active(site_config) and site_config.announcement_public
+            items = (
+                [{
+                    "text": site_config.announcement,
                     "level": site_config.announcement_level,
                     "until": site_config.announcement_until,
-                },
+                }]
+                if active
+                else []
             )
+            self._send_json(200, {"items": items})
             return
         if path == "/panel":
             self._send_html(_apply_panel_theme(PANEL_HTML) + ANNOUNCEMENT_SCRIPT)
