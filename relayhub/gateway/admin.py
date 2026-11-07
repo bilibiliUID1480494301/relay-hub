@@ -1447,6 +1447,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         last = ""
+        prev_cooling: dict[str, str] | None = None
         try:
             emit({"type": "hello", "api_compat": API_COMPAT})
             for tick in range(60):
@@ -1457,6 +1458,25 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if stamp != last:
                     last = stamp
                     emit({"type": "state.changed", "ts": int(time.time())})
+
+                # 冷却差分：进/出冷却各推一条，客户端据此弹「渠道冷却」而不是笼统提示
+                try:
+                    pool_now = KeyPool.load(self.pool_path)
+                    cooling = {
+                        key.key_id: key.cooldown_tier
+                        for key in getattr(pool_now, "keys", [])
+                        if getattr(key, "cooldown_tier", "")
+                    }
+                except Exception:  # noqa: BLE001
+                    cooling = {}
+                if prev_cooling is not None:
+                    for key_id, tier in cooling.items():
+                        if key_id not in prev_cooling:
+                            emit({"type": "channel.cooldown", "id": key_id, "tier": tier})
+                    for key_id in prev_cooling:
+                        if key_id not in cooling:
+                            emit({"type": "channel.recovered", "id": key_id})
+                prev_cooling = cooling
                 if tick % 10 == 0:
                     self.wfile.write((": ping" + nl + nl).encode())
                     self.wfile.flush()
