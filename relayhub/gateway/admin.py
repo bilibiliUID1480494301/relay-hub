@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .. import __version__ as relayhub_version
 from .compat import API_COMPAT
+from . import scopes as scope_module
 from .. import paths
 from . import atomicio
 from . import audit as audit_module
@@ -48,7 +49,7 @@ from . import features as features_module
 from . import site as site_module
 from . import upstream
 from .policy import KIND_DEVICE, KIND_IP, PolicyError, PolicyStore
-from .users import RedeemStore, UserError, UserPool, hash_password
+from .users import RedeemStore, UserError, UserPool, hash_password, verify_password
 
 from .pool import (
     SUPPORTED_PROTOCOLS,
@@ -83,6 +84,13 @@ def _webui_image_ok(url: str) -> bool:
 
 ADMIN_HEADER = "X-Admin-Token"
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+def _expired(entry: object, now: float) -> bool:
+    """会话条目可能是 {exp, role, user}（新）或裸 float（旧），两种都认。"""
+    if isinstance(entry, dict):
+        return float(entry.get("exp") or 0) <= now
+    return float(entry or 0) <= now
+
+
 SESSION_COOKIE = "rh_admin_session"
 SESSION_TTL = 86400.0
 
@@ -309,8 +317,10 @@ class AdminHandler(BaseHTTPRequestHandler):
     def _error(self, status: int, message: str) -> None:
         self._send_json(status, {"error": message})
 
-    # 请求级角色：owner | admin。版本号只给 owner（见 _state）
+    # 请求级身份：owner | admin | viewer。版本号只给 owner（见 _state）
     role: str = ""
+    username: str = ""
+    extra_scopes: list[str] = []
 
     def _authorized(self) -> bool:
         if not self.token:
@@ -323,14 +333,33 @@ class AdminHandler(BaseHTTPRequestHandler):
             self.role = "owner"   # 持有管理 token 视为站长
             return True
         # 登录会话：浏览器登录一次后用 HttpOnly cookie，免去把 token 长期挂在 URL 里
-        if self._session_valid():
-            # 会话是用 admin token 换来的（见 _login），所以同样是 owner。
-            # 真正的「非 owner 管理员」要等 users.json 账号能登录管理面之后才有。
-            self.role = "owner"
+        principal = self._session_principal()
+        if principal is not None:
+            self.role = principal["role"]
+            self.username = principal["user"]
+            self.extra_scopes = principal.get("scopes") or []
             return True
         return False
 
     # -- 登录会话 ----------------------------------------------------------
+
+    def _session_principal(self) -> dict[str, str] | None:
+        for part in self.headers.get("Cookie", "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name != SESSION_COOKIE or not value:
+                continue
+            sessions = self.server.sessions  # type: ignore[attr-defined]
+            entry = sessions.get(value)
+            if entry is None or _expired(entry, time.time()):
+                return None
+            if isinstance(entry, dict):
+                return {
+                    "role": str(entry.get("role") or "owner"),
+                    "user": str(entry.get("user") or ""),
+                    "scopes": list(entry.get("scopes") or []),
+                }
+            return {"role": "owner", "user": "", "scopes": []}   # 旧格式（只有过期时间）
+        return None
 
     def _session_valid(self) -> bool:
         """校验 Cookie 里的会话 id。会话表在 AdminServer 内存里，重启即失效。"""
@@ -350,14 +379,15 @@ class AdminHandler(BaseHTTPRequestHandler):
             return True
         return False
 
-    def _start_session(self) -> str:
+    def _start_session(self, role: str = "owner", username: str = "", scopes: list[str] | None = None) -> str:
+        """sessions[sid] = {exp, role, user}：会话必须记住「是谁」，否则 RBAC 无从判断。"""
         sid = secrets.token_urlsafe(24)
         sessions = self.server.sessions  # type: ignore[attr-defined]
         with self.server.session_lock:  # type: ignore[attr-defined]
             now = time.time()
-            for key in [k for k, exp in sessions.items() if exp <= now]:
+            for key in [k for k, v in sessions.items() if _expired(v, now)]:
                 sessions.pop(key, None)
-            sessions[sid] = now + SESSION_TTL
+            sessions[sid] = {"exp": now + SESSION_TTL, "role": role, "user": username, "scopes": scopes}
         return sid
 
     def _end_session(self) -> None:
@@ -368,6 +398,22 @@ class AdminHandler(BaseHTTPRequestHandler):
                 with self.server.session_lock:  # type: ignore[attr-defined]
                     self.server.sessions.pop(value, None)  # type: ignore[attr-defined]
 
+    def _verify_admin_account(self, username: str, password: str) -> dict[str, Any] | None:
+        """管理面账号登录：复用用户库的 pbkdf2 校验，只允许 role=admin 的账号。"""
+        try:
+            pool = UserPool.load(self.server.users_path)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            return None
+        for user in getattr(pool, "users", []):
+            if user.username != username or not user.enabled:
+                continue
+            if not verify_password(password, user.password_hash):
+                return None
+            if user.role != "admin":
+                return None    # 普通用户不能进管理面
+            return {"role": "admin", "user": user.username, "scopes": list(getattr(user, "scopes", []) or [])}
+        return None
+
     def _login(self) -> None:
         """POST /login：管理面令牌换一个会话 cookie（网页「登录」）。"""
         if not self.token:
@@ -377,10 +423,28 @@ class AdminHandler(BaseHTTPRequestHandler):
         if body is None:
             return
         supplied = str(body.get("token") or "")
-        if not supplied or not self.server._token_ok(supplied):  # type: ignore[attr-defined]
-            self._error(401, "token 或动态码不正确")
+        username = str(body.get("username") or "")
+        password = str(body.get("password") or "")
+
+        if supplied and self.server._token_ok(supplied):  # type: ignore[attr-defined]
+            sid = self._start_session("owner", "")
+        elif username and password:
+            user = self._verify_admin_account(username, password)
+            if user is None:
+                self._error(401, "账号或密码不正确")
+                return
+            sid = self._start_session(
+                "admin" if user.get("role") == "admin" else "viewer",
+                username,
+                list(user.get("scopes") or []),
+            )
+            audit_module.record(
+                "admin.login", path=self.server.audit_path,  # type: ignore[attr-defined]
+                principal=username, role=sid and ("admin" if user.get("role") == "admin" else "viewer"),
+            )
+        else:
+            self._error(401, "token 或账号密码不正确")
             return
-        sid = self._start_session()
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header(
@@ -429,6 +493,10 @@ class AdminHandler(BaseHTTPRequestHandler):
             "exists": self.pool_path.is_file(),
             "site_name": site_module.load_site(paths.site_path()).name,
             "version": relayhub_version if self.role == "owner" else "hidden",
+            "role": self.role or "owner",
+            "scopes": sorted(
+                set(scope_module.ROLE_SCOPES.get(self.role or "owner", ())) | set(self.extra_scopes)
+            ),
             "strategy": pool.strategy,
             "strategies": list(STRATEGIES),
             "failure_threshold": pool.failure_threshold,
@@ -544,6 +612,16 @@ class AdminHandler(BaseHTTPRequestHandler):
         if not known:
             self._error(404, f"未知路径 {self.path.split('?')[0]}")
             return
+        # 写操作统一按资源查 scope（默认拒绝）：客户端藏按钮不算安全边界。
+        if method != "GET" and len(parts) >= 2:
+            needed = scope_module.WRITE_SCOPES.get(parts[1])
+            if needed and not scope_module.allowed(self.role or "owner", needed, self.extra_scopes):
+                audit_module.record(
+                    "admin.denied", path=self.server.audit_path,  # type: ignore[attr-defined]
+                    principal=self.username or self.role, scope=needed,
+                )
+                self._error(403, f"权限不足：需要 {needed}")
+                return
 
         if parts == ["api", "announcement"] and method == "POST":
             self._set_announcement()

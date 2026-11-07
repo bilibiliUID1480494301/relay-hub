@@ -117,6 +117,8 @@ class User:
     used: int = 0
     group: str = "default"
     note: str = ""
+    # 管理面逐项授权（仅 role=admin 用）；owner 恒为全量
+    scopes: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -133,6 +135,7 @@ class User:
             channel=normalize_channel(raw.get("channel")),
             enabled=bool(raw.get("enabled", True)),
             quota=int(raw.get("quota", 0) or 0),
+            scopes=[str(s) for s in (raw.get("scopes") or [])],
             used=int(raw.get("used", 0) or 0),
             group=str(raw.get("group") or "default"),
             note=str(raw.get("note", "")),

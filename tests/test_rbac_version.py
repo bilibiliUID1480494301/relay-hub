@@ -50,3 +50,39 @@ def test_owner_sees_version_admin_sees_hidden(tmp_path):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_admin_cannot_write_channels_but_owner_can(tmp_path):
+    """写操作由服务端按 scope 拒绝：admin 只读，owner 全权。"""
+    srv = _server(tmp_path)
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        srv.sessions["sid-admin"] = {"exp": time.time() + 300, "role": "admin", "user": "ops"}
+        cookie = {"Cookie": f"{SESSION_COOKIE}=sid-admin"}
+
+        def post(headers):
+            req = urllib.request.Request(base + "/api/keys", data=b"{}", method="POST")
+            req.add_header("Content-Type", "application/json")
+            for k, v in headers.items():
+                req.add_header(k, v)
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status
+            except urllib.error.HTTPError as e:
+                return e.code
+
+        assert post(cookie) == 403                       # admin 无 channel:write
+        assert post({"X-Admin-Token": "t"}) in (400, 200)  # owner 通过鉴权（后续校验另说）
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_extra_scope_grants_write_for_admin(tmp_path):
+    """逐用户授权：admin 默认只读，但被单独授予 channel:write 后可以写。"""
+    from relayhub.gateway.scopes import allowed
+
+    assert allowed("admin", "channel:write") is False
+    assert allowed("admin", "channel:write", ["channel:write"]) is True
+    assert allowed("admin", "channel:write", ["bogus:scope"]) is False
+    assert allowed("owner", "anything", []) is True
