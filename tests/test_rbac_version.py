@@ -22,6 +22,7 @@ def _server(tmp_path: Path) -> AdminServer:
         tokens_path=tmp_path / "tokens.json",
         requests_log_path=tmp_path / "req.jsonl",
     )
+    srv.users_path = tmp_path / "users.json"      # 别写到全局用户库（会跨用例脏）
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -110,5 +111,23 @@ def test_only_owner_can_create_admin_account(tmp_path):
         assert create({"Cookie": f"{SESSION_COOKIE}=sid-adm"}, "adm1") == 403
         assert create({"X-Admin-Token": "t"}, "adm2") == 200
     finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_events_streams_hello_frame(tmp_path):
+    import http.client
+
+    srv = _server(tmp_path)
+    conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
+    try:
+        conn.request("GET", "/api/events", headers={"X-Admin-Token": "t"})
+        resp = conn.getresponse()
+        assert resp.status == 200
+        assert resp.getheader("Content-Type").startswith("text/event-stream")
+        first = resp.fp.readline()
+        assert b"hello" in first and b"api_compat" in first
+    finally:
+        conn.close()
         srv.shutdown()
         srv.server_close()

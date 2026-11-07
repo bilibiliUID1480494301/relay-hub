@@ -552,6 +552,13 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, self._state())
             return
+        if path == "/api/events":
+            # SSE：状态变化 + 心跳。比轮询省请求，也不需要实现 WebSocket。
+            if not self._authorized():
+                self._error(401, "缺少或错误的 token")
+                return
+            self._events()
+            return
         read_routes = {
             "/api/clients": self._clients_state,
             "/api/tokens": self._tokens_state,
@@ -606,6 +613,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             ["api", "keys"], ["api", "tokens"],
             ["api", "users"], ["api", "codes"], ["api", "policy"],
             ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"], ["api", "fingerprint"], ["api", "announcement"],
+            ["api", "events"],
         ) or parts in (
             ["api", "settings"], ["api", "webui"],
         )
@@ -1425,6 +1433,36 @@ class AdminHandler(BaseHTTPRequestHandler):
         )
         audit_module.record("site.announcement", path=self.server.audit_path)  # type: ignore[attr-defined]
         self._send_json(200, _announcement_payload())
+
+    def _events(self) -> None:
+        """SSE 推送：首帧 hello，随后状态变化与心跳；最长 2 分钟由客户端重连。"""
+        nl = chr(10)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        def emit(payload: dict[str, Any]) -> None:
+            self.wfile.write(("data: " + json.dumps(payload, ensure_ascii=False) + nl + nl).encode())
+            self.wfile.flush()
+
+        last = ""
+        try:
+            emit({"type": "hello", "api_compat": API_COMPAT})
+            for tick in range(60):
+                try:
+                    stamp = str(self.pool_path.stat().st_mtime_ns)
+                except OSError:
+                    stamp = ""
+                if stamp != last:
+                    last = stamp
+                    emit({"type": "state.changed", "ts": int(time.time())})
+                if tick % 10 == 0:
+                    self.wfile.write((": ping" + nl + nl).encode())
+                    self.wfile.flush()
+                time.sleep(2)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
     def _fingerprint_scan(self) -> None:
         """扫描各渠道的模型清单，比对上次指纹，返回变动（同名换后端/加删模型）。"""
