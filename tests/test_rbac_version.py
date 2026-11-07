@@ -86,3 +86,29 @@ def test_extra_scope_grants_write_for_admin(tmp_path):
     assert allowed("admin", "channel:write", ["channel:write"]) is True
     assert allowed("admin", "channel:write", ["bogus:scope"]) is False
     assert allowed("owner", "anything", []) is True
+
+
+def test_only_owner_can_create_admin_account(tmp_path):
+    """授予管理员是站长专属动作；admin 自己不能造 admin。"""
+    srv = _server(tmp_path)
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def create(headers, name):
+        body = json.dumps({"username": name, "password": "pw12345678", "role": "admin"}).encode()
+        req = urllib.request.Request(base + "/api/users", data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        for k, v in headers.items():
+            req.add_header(k, v)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    try:
+        srv.sessions["sid-adm"] = {"exp": time.time() + 300, "role": "admin", "user": "ops", "scopes": []}
+        assert create({"Cookie": f"{SESSION_COOKIE}=sid-adm"}, "adm1") == 403
+        assert create({"X-Admin-Token": "t"}, "adm2") == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()

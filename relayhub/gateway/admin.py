@@ -1001,10 +1001,23 @@ class AdminHandler(BaseHTTPRequestHandler):
             if method == "POST":
                 body = self._read_json() or {}
 
+                wanted_role = str(body.get("role") or "").strip()
+                if wanted_role and wanted_role not in ("user", "vip", "admin"):
+                    self._error(400, f"未知角色 {wanted_role}")
+                    return
+                if wanted_role == "admin" and self.role != "owner":
+                    self._error(403, "只有站长可以授予管理员")
+                    return
+                wanted_scopes = [str(s) for s in (body.get("scopes") or [])]
+
                 def add(pool: UserPool) -> None:
                     user = pool.register(
                         str(body.get("username") or ""), str(body.get("password") or "")
                     )
+                    if wanted_role:
+                        user.role = wanted_role
+                    if wanted_scopes and self.role == "owner":
+                        user.scopes = wanted_scopes
                     user.quota = int(body.get("quota") if body.get("quota") is not None else pool.default_quota)
                     if str(body.get("group") or "").strip():
                         user.group = str(body["group"]).strip()
