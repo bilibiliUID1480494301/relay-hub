@@ -833,6 +833,16 @@ def _apply_panel_theme(html: str) -> str:
     return html.replace("__THEME_BG__", _panel_bg_css(), 1)
 
 
+def _theme_vars(config) -> str:
+    """只输出 CSS 变量；颜色已在 site.sanitize_color 里限成 #rgb/#rrggbb。"""
+    rules = []
+    if config.theme_primary:
+        rules.append(f"--brand:{config.theme_primary}")
+    if config.theme_bg:
+        rules.append(f"--bg:{config.theme_bg}")
+    return ("<style>:root{" + ";".join(rules) + "}</style>") if rules else ""
+
+
 ANNOUNCEMENT_SCRIPT = """<script>
 fetch('/public/announcements').then(function(r){return r.json();}).then(function(a){
   if(!a || !a.items || !a.items.length) return;
@@ -2101,7 +2111,9 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"items": items})
             return
         if path == "/panel":
-            self._send_html(_apply_panel_theme(PANEL_HTML) + ANNOUNCEMENT_SCRIPT)
+            panel = _apply_panel_theme(PANEL_HTML)
+            panel = panel.replace("</head>", _theme_vars(site_module.load_site(paths.site_path())) + "</head>", 1)
+            self._send_html(panel + ANNOUNCEMENT_SCRIPT)
             return
         if path == "/api/user/me":
             user = self._session_user()

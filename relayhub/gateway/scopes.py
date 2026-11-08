@@ -33,6 +33,7 @@ WRITE_SCOPES: dict[str, str] = {
     "settings": "config:write",
     "webui": "config:write",
     "announcement": "config:write",
+    "theme": "config:write",
     "fingerprint": "channel:read",
     "probe": "channel:read",
     "newapi": "config:read",

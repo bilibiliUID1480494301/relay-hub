@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+import re
 from html import escape
 from pathlib import Path
 
@@ -33,6 +34,10 @@ class SiteConfig:
     announcement_until: int = 0
     announcement_level: str = "info"   # info | warning | critical
     announcement_public: bool = False  # 是否允许未认证访问（走 /public/announcements）
+    # 主题：只收颜色（#rgb/#rrggbb）与可选 Logo URL，**不收整段 CSS**（那就是存储型 XSS）
+    theme_primary: str = ""
+    theme_bg: str = ""
+    theme_logo: str = ""
 
 
 def sanitize_name(raw: object) -> str:
@@ -58,6 +63,19 @@ def announcement_active(config: SiteConfig, now: int | None = None) -> bool:
     return int(config.announcement_until) > int(now if now is not None else time.time())
 
 
+COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+def sanitize_color(raw: object) -> str:
+    text = str(raw or "").strip()
+    return text if COLOR_RE.match(text) else ""
+
+
+def sanitize_logo(raw: object) -> str:
+    text = str(raw or "").strip()
+    return text if text.startswith(("https://", "http://")) and len(text) <= 300 else ""
+
+
 def load_site(path: Path) -> SiteConfig:
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -71,7 +89,9 @@ def load_site(path: Path) -> SiteConfig:
         announcement=sanitize_announcement(raw.get("announcement")),
         announcement_until=int(raw.get("announcement_until") or 0),
         announcement_level=level if level in ("info", "warning", "critical") else "info",
-        announcement_public=bool(raw.get("announcement_public")),
+        theme_primary=sanitize_color(raw.get("theme_primary")),
+        theme_bg=sanitize_color(raw.get("theme_bg")),
+        theme_logo=sanitize_logo(raw.get("theme_logo")),
     )
 
 
@@ -81,6 +101,9 @@ def save_site(
     announcement: object | None = None,
     announcement_until: object | None = None,
     announcement_level: object | None = None,
+    theme_primary: object | None = None,
+    theme_bg: object | None = None,
+    theme_logo: object | None = None,
 ) -> SiteConfig:
     """改名 / 改公告共用一处落盘；未传的字段沿用现有值（改名不该清掉公告）。"""
     path = Path(path)
@@ -99,6 +122,9 @@ def save_site(
             else max(0, int(announcement_until or 0))
         ),
         announcement_level=level if level in ("info", "warning", "critical") else "info",
+        theme_primary=current.theme_primary if theme_primary is None else sanitize_color(theme_primary),
+        theme_bg=current.theme_bg if theme_bg is None else sanitize_color(theme_bg),
+        theme_logo=current.theme_logo if theme_logo is None else sanitize_logo(theme_logo),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     write_json_atomic(
@@ -110,6 +136,9 @@ def save_site(
             "announcement_until": site.announcement_until,
             "announcement_level": site.announcement_level,
             "announcement_public": site.announcement_public,
+            "theme_primary": site.theme_primary,
+            "theme_bg": site.theme_bg,
+            "theme_logo": site.theme_logo,
         },
     )
     return site

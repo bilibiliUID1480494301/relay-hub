@@ -32,6 +32,8 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .. import __version__ as relayhub_version
+from .. import __version__ as _version
+from . import security as security_module
 from .compat import API_COMPAT
 from . import scopes as scope_module
 from .. import paths
@@ -552,6 +554,12 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, self._state())
             return
+        if path == "/api/security":
+            if not self._authorized():
+                self._error(401, "缺少或错误的 token")
+                return
+            self._send_json(200, self._security_state())
+            return
         if path == "/api/plugin-costs":
             if not self._authorized():
                 self._error(401, "缺少或错误的 token")
@@ -623,7 +631,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         known = parts[:2] in (
             ["api", "keys"], ["api", "tokens"],
             ["api", "users"], ["api", "codes"], ["api", "policy"],
-            ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"], ["api", "fingerprint"], ["api", "announcement"],
+            ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"], ["api", "fingerprint"], ["api", "announcement"], ["api", "theme"],
             ["api", "events"],
         ) or parts in (
             ["api", "settings"], ["api", "webui"],
@@ -641,6 +649,19 @@ class AdminHandler(BaseHTTPRequestHandler):
                 )
                 self._error(403, f"权限不足：需要 {needed}")
                 return
+
+        if parts == ["api", "theme"] and method == "POST":
+            body = self._read_json() or {}
+            current = site_module.load_site(paths.site_path())
+            site_module.save_site(
+                paths.site_path(), current.name,
+                theme_primary=body.get("primary"),
+                theme_bg=body.get("bg"),
+                theme_logo=body.get("logo"),
+            )
+            audit_module.record("site.theme", path=self.server.audit_path)  # type: ignore[attr-defined]
+            self._send_json(200, {"ok": True})
+            return
 
         if parts == ["api", "announcement"] and method == "POST":
             self._set_announcement()
@@ -1444,6 +1465,16 @@ class AdminHandler(BaseHTTPRequestHandler):
         )
         audit_module.record("site.announcement", path=self.server.audit_path)  # type: ignore[attr-defined]
         self._send_json(200, _announcement_payload())
+
+    def _security_state(self) -> dict[str, Any]:
+        """安全公告 + 版本检查，结果缓存 6 小时（别每次刷新都打 GitHub/PyPI）。"""
+        now = time.time()
+        cache = getattr(self.server, "security_cache", None)
+        if cache and now - cache.get("checked_at", 0) < 6 * 3600:
+            return cache
+        result = security_module.check(_version)
+        self.server.security_cache = result  # type: ignore[attr-defined]
+        return result
 
     def _plugin_costs(self, days: int = 7) -> dict[str, Any]:
         """按插件聚合 pluginlogs/<plugin>/<YYYYMMDD>.jsonl。
