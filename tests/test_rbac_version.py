@@ -164,3 +164,43 @@ def test_plugin_costs_aggregate_tokens(tmp_path):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_events_rejects_when_too_many_clients(tmp_path):
+    """连接数上限：超了回 503，不能无限吃线程。"""
+    import http.client
+    import queue as _queue
+
+    from relayhub.gateway.admin import MAX_SSE_CLIENTS
+
+    srv = _server(tmp_path)
+    try:
+        with srv.events_lock:
+            srv.events_subs.extend(_queue.Queue() for _ in range(MAX_SSE_CLIENTS))
+        conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
+        conn.request("GET", "/api/events", headers={"X-Admin-Token": "t"})
+        assert conn.getresponse().status == 503
+        conn.close()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_events_rejects_when_too_many_clients(tmp_path):
+    """连接数上限：超了回 503，不能无限吃线程。"""
+    import http.client
+    import queue as _queue
+
+    from relayhub.gateway.admin import MAX_SSE_CLIENTS
+
+    srv = _server(tmp_path)
+    try:
+        with srv.events_lock:
+            srv.events_subs.extend(_queue.Queue() for _ in range(MAX_SSE_CLIENTS))
+        conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
+        conn.request("GET", "/api/events", headers={"X-Admin-Token": "t"})
+        assert conn.getresponse().status == 503
+        conn.close()
+    finally:
+        srv.shutdown()
+        srv.server_close()

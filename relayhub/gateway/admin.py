@@ -22,6 +22,7 @@ import json
 import re
 import secrets
 import sys
+import queue
 import threading
 import time
 import uuid
@@ -1524,9 +1525,36 @@ class AdminHandler(BaseHTTPRequestHandler):
         plugins.sort(key=lambda r: r["tokens_in"] + r["tokens_out"], reverse=True)
         return {"ok": True, "days": days, "plugins": plugins}
 
+    def _events_subscribe(self) -> "queue.Queue[str]":
+        """注册一个订阅队列；超过上限返回 None（由调用方回 503）。"""
+        server = self.server
+        with server.events_lock:  # type: ignore[attr-defined]
+            if len(server.events_subs) >= MAX_SSE_CLIENTS:  # type: ignore[attr-defined]
+                return None
+            box: queue.Queue[str] = queue.Queue(maxsize=64)
+            server.events_subs.append(box)  # type: ignore[attr-defined]
+        # 注意：**必须在锁外**启动，否则 _start_events_hub 再次抢同一把锁 → 死锁
+        self._start_events_hub()
+        return box
+
+    def _start_events_hub(self) -> None:
+        server = self.server
+        with server.events_lock:  # type: ignore[attr-defined]
+            if getattr(server, "events_thread", None) is not None:
+                return
+            thread = threading.Thread(
+                target=_events_hub, args=(server,), name="rh-events-hub", daemon=True
+            )
+            server.events_thread = thread  # type: ignore[attr-defined]
+            thread.start()
+
     def _events(self) -> None:
-        """SSE 推送：首帧 hello，随后状态变化与心跳；最长 2 分钟由客户端重连。"""
+        """SSE：订阅单例广播器。**不在连接里读盘**——N 个客户端只读一次。"""
         nl = chr(10)
+        box = self._events_subscribe()
+        if box is None:
+            self._error(503, "事件流连接数已达上限")
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -1536,43 +1564,30 @@ class AdminHandler(BaseHTTPRequestHandler):
             self.wfile.write(("data: " + json.dumps(payload, ensure_ascii=False) + nl + nl).encode())
             self.wfile.flush()
 
-        last = ""
-        prev_cooling: dict[str, str] | None = None
         try:
-            emit({"type": "hello", "api_compat": API_COMPAT})
-            for tick in range(60):
+            self.wfile.write(
+                ("data: " + json.dumps({"type": "hello", "api_compat": API_COMPAT}) + nl + nl).encode()
+            )
+            self.wfile.flush()
+            idle = 0
+            while idle < 60:                      # 2 分钟无事件则收线，客户端重连
                 try:
-                    stamp = str(self.pool_path.stat().st_mtime_ns)
-                except OSError:
-                    stamp = ""
-                if stamp != last:
-                    last = stamp
-                    emit({"type": "state.changed", "ts": int(time.time())})
-
-                # 冷却差分：进/出冷却各推一条，客户端据此弹「渠道冷却」而不是笼统提示
-                try:
-                    pool_now = KeyPool.load(self.pool_path)
-                    cooling = {
-                        key.key_id: key.cooldown_tier
-                        for key in getattr(pool_now, "keys", [])
-                        if getattr(key, "cooldown_tier", "")
-                    }
-                except Exception:  # noqa: BLE001
-                    cooling = {}
-                if prev_cooling is not None:
-                    for key_id, tier in cooling.items():
-                        if key_id not in prev_cooling:
-                            emit({"type": "channel.cooldown", "id": key_id, "tier": tier})
-                    for key_id in prev_cooling:
-                        if key_id not in cooling:
-                            emit({"type": "channel.recovered", "id": key_id})
-                prev_cooling = cooling
-                if tick % 10 == 0:
+                    payload = box.get(timeout=20)
+                except queue.Empty:
                     self.wfile.write((": ping" + nl + nl).encode())
                     self.wfile.flush()
-                time.sleep(2)
+                    idle += 10
+                    continue
+                self.wfile.write(("data: " + payload + nl + nl).encode())
+                self.wfile.flush()
+                idle = 0
         except (BrokenPipeError, ConnectionResetError, OSError):
-            return
+            pass
+        finally:
+            server = self.server
+            with server.events_lock:  # type: ignore[attr-defined]
+                if box in server.events_subs:  # type: ignore[attr-defined]
+                    server.events_subs.remove(box)  # type: ignore[attr-defined]
 
     def _fingerprint_scan(self) -> None:
         """扫描各渠道的模型清单，比对上次指纹，返回变动（同名换后端/加删模型）。"""
@@ -1839,6 +1854,54 @@ def _announcement_payload() -> dict[str, Any]:
     }
 
 
+MAX_SSE_CLIENTS = 16
+
+
+def _events_hub(server: object) -> None:
+    """单例：每 2 秒读一次号池，把变化广播给所有订阅者。"""
+    prev_mode: dict[str, str] | None = None
+    last_stamp = ""
+    while True:
+        time.sleep(2)
+        try:
+            pool = KeyPool.load(server.pool_path)  # type: ignore[attr-defined]
+            stamp = str(server.pool_path.stat().st_mtime_ns)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            continue
+        events: list[dict[str, Any]] = []
+        if stamp != last_stamp:
+            last_stamp = stamp
+            events.append({"type": "state.changed", "ts": int(time.time())})
+        cooling = {
+            key.key_id: key.cooldown_tier
+            for key in getattr(pool, "keys", [])
+            if getattr(key, "cooldown_tier", "")
+        }
+        if prev_mode is not None:
+            for key_id, tier in cooling.items():
+                if key_id not in prev_mode:
+                    events.append({"type": "channel.cooldown", "id": key_id, "tier": tier})
+            for key_id in prev_mode:
+                if key_id not in cooling:
+                    events.append({"type": "channel.recovered", "id": key_id})
+        prev_mode = cooling
+        if not events:
+            continue
+        with server.events_lock:  # type: ignore[attr-defined]
+            subs = list(server.events_subs)  # type: ignore[attr-defined]
+        for payload in events:
+            text = json.dumps(payload, ensure_ascii=False)
+            for box in subs:
+                try:
+                    box.put_nowait(text)
+                except queue.Full:
+                    try:
+                        box.get_nowait()      # 丢最旧的，保最新
+                        box.put_nowait(text)
+                    except queue.Empty:
+                        pass
+
+
 class AdminServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -1875,6 +1938,10 @@ class AdminServer(ThreadingHTTPServer):
         super().__init__(address, AdminHandler)
         self.pool_path = Path(pool_path)
         self.token = token
+        # SSE 单例广播器状态
+        self.events_lock = threading.Lock()
+        self.events_subs: list[queue.Queue[str]] = []
+        self.events_thread: threading.Thread | None = None
         # TOTP 动态密码（RFC 6238，base32 密钥）：非空时登录须提供
         # 「token:6位动态码」。管理面可以动态，用户密码永远静态（防锁死）。
         self.totp_secret = (totp_secret or "").strip()
