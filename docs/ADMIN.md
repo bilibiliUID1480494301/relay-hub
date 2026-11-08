@@ -199,3 +199,29 @@ modalities / ratio / completion_ratio` 规范化后 sha256 前 16 位），只�
 ```
 
 用户报障时贴这一串即可定位；不需要让他们翻响应头。
+
+
+## 一键升级与回滚
+
+| 端点 | 权限 | 说明 |
+|---|---|---|
+| `POST /api/update/install` | **仅 owner** | `{version, apply, force?, reason?}`：下载 → 验签 → 安装 |
+| `POST /api/update/rollback` | **仅 owner** | 退回上一版（依赖 `updates/history.json`） |
+
+- 验签失败：默认 **409 不安装**；`force:true` 需附 `reason`（≥8 字），会写 `update.forced` 审计并返回 `verified:false`
+- 安装用 `pip install --no-deps --force-reinstall --no-input`，不动依赖、不交互
+- 装完写 `restart.flag`，**由外部 keepalive 拉起新进程**；服务自己不退出（避免无人接管的空窗）
+- 历史保留最近 5 版 wheel，装坏可回滚
+
+
+## 一键升级与回滚
+
+| 端点 | 权限 | 说明 |
+|---|---|---|
+| `POST /api/update/install` | **仅 owner** | `{version, apply, force?, reason?}`：下载 → 验签 → 安装 |
+| `POST /api/update/rollback` | **仅 owner** | 退回上一版（依赖 `updates/history.json`） |
+
+- 验签失败：默认 **409 不安装**；`force:true` 需附 `reason`（≥8 字），会写 `update.forced` 审计并返回 `verified:false`
+- 安装用 `pip install --no-deps --force-reinstall --no-input`，不动依赖、不交互
+- 装完写 `restart.flag`，**由外部 keepalive 拉起新进程**；服务自己不退出（避免无人接管的空窗）
+- 历史保留最近 5 版 wheel，装坏可回滚

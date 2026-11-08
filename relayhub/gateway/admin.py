@@ -35,6 +35,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .. import __version__ as relayhub_version
 from .. import __version__ as _version
 from . import security as security_module
+from . import updater as updater_module
 from .compat import API_COMPAT
 from . import scopes as scope_module
 from .. import paths
@@ -632,7 +633,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         known = parts[:2] in (
             ["api", "keys"], ["api", "tokens"],
             ["api", "users"], ["api", "codes"], ["api", "policy"],
-            ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"], ["api", "fingerprint"], ["api", "announcement"], ["api", "theme"],
+            ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"], ["api", "fingerprint"], ["api", "announcement"], ["api", "theme"], ["api", "update"],
             ["api", "events"],
         ) or parts in (
             ["api", "settings"], ["api", "webui"],
@@ -650,6 +651,14 @@ class AdminHandler(BaseHTTPRequestHandler):
                 )
                 self._error(403, f"权限不足：需要 {needed}")
                 return
+
+        if parts == ["api", "update", "rollback"] and method == "POST":
+            self._update_rollback()
+            return
+
+        if parts == ["api", "update", "install"] and method == "POST":
+            self._update_install()
+            return
 
         if parts == ["api", "theme"] and method == "POST":
             body = self._read_json() or {}
@@ -1466,6 +1475,87 @@ class AdminHandler(BaseHTTPRequestHandler):
         )
         audit_module.record("site.announcement", path=self.server.audit_path)  # type: ignore[attr-defined]
         self._send_json(200, _announcement_payload())
+
+    def _update_install(self) -> None:
+        """一键升级：下载→验签→（可选）安装。**验签不过一律 409，停在原地**。
+
+        只给 owner：这会把新代码装到本机。admin 即便有 config:write 也不行。
+        """
+        if self.role != "owner":
+            self._error(403, "只有站长可以执行升级")
+            return
+        body = self._read_json() or {}
+        version = str(body.get("version") or "").strip()
+        apply_now = bool(body.get("apply"))
+        if not version:
+            self._error(400, "缺少 version")
+            return
+
+        force = bool(body.get("force"))
+        reason = str(body.get("reason") or "").strip()
+        if force and len(reason) < 8:
+            self._error(400, "强制跳过验签必须写明原因（至少 8 字），会记入审计")
+            return
+
+        cache = paths.audit_path().parent / "updates"
+        staged = updater_module.stage(version, cache, force=force)
+        if not staged["ok"]:
+            audit_module.record(
+                "update.rejected", path=self.server.audit_path,  # type: ignore[attr-defined]
+                version=version, reason=staged["error"][:120],
+            )
+            self._error(409, f"校验未通过，已拒绝升级：{staged['error']}")
+            return
+
+        if not staged.get("verified", True):
+            audit_module.record(
+                "update.forced", path=self.server.audit_path,  # type: ignore[attr-defined]
+                version=version, reason=reason, sha256=staged.get("sha256", ""),
+            )
+
+        result: dict[str, Any] = {
+            "staged": staged,
+            "applied": False,
+            "verified": bool(staged.get("verified")),
+            "warning": "" if staged.get("verified") else f"未通过验签：{staged.get('error', '')}",
+        }
+        if apply_now:
+            result["install"] = updater_module.install(updater_module.default_python(), Path(staged["wheel"]))
+            result["applied"] = bool(result["install"]["ok"])
+            if result["applied"]:
+                updater_module.record_install(cache, version, Path(staged["wheel"]), staged["sha256"])
+                # 只写标记，由 keepalive 拉起新进程——服务内自杀会留下无人拉起的时间窗
+                updater_module.request_restart(paths.audit_path().parent / "restart.flag", version)
+                result["restart_pending"] = True
+            audit_module.record(
+                "update.applied", path=self.server.audit_path,  # type: ignore[attr-defined]
+                version=version, ok=str(result["applied"]),
+            )
+        self._send_json(200, result)
+
+    def _update_rollback(self) -> None:
+        """退回上一版。装坏的唯一止损手段，所以只给 owner 且必须有历史。"""
+        if self.role != "owner":
+            self._error(403, "只有站长可以回滚")
+            return
+        cache = paths.audit_path().parent / "updates"
+        previous = updater_module.previous_install(cache)
+        if previous is None:
+            self._error(409, "没有可回滚的上一版（历史不足或 wheel 已丢失）")
+            return
+        outcome = updater_module.install(updater_module.default_python(), Path(previous["wheel"]))
+        audit_module.record(
+            "update.rollback", path=self.server.audit_path,  # type: ignore[attr-defined]
+            version=str(previous.get("version", "")), ok=str(outcome["ok"]),
+        )
+        if outcome["ok"]:
+            updater_module.request_restart(
+                paths.audit_path().parent / "restart.flag", str(previous.get("version", ""))
+            )
+        self._send_json(
+            200 if outcome["ok"] else 500,
+            {"rolled_back_to": previous.get("version", ""), "install": outcome, "restart_pending": outcome["ok"]},
+        )
 
     def _security_state(self) -> dict[str, Any]:
         """安全公告 + 版本检查，结果缓存 6 小时（别每次刷新都打 GitHub/PyPI）。"""

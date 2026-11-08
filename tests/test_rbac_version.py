@@ -204,3 +204,26 @@ def test_events_rejects_when_too_many_clients(tmp_path):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_update_install_is_owner_only(tmp_path):
+    """升级会把新代码装到本机：admin 即便有 config:write 也不行。"""
+    srv = _server(tmp_path)
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        srv.sessions["sid-adm"] = {"exp": time.time() + 300, "role": "admin", "user": "ops",
+                                   "scopes": ["config:write"]}
+        req = urllib.request.Request(
+            base + "/api/update/install",
+            data=json.dumps({"version": "9.9.9"}).encode(), method="POST",
+        )
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Cookie", f"{SESSION_COOKIE}=sid-adm")
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            assert False, "admin 不该能升级"
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
+    finally:
+        srv.shutdown()
+        srv.server_close()
