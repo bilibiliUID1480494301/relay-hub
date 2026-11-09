@@ -571,9 +571,12 @@ def _cmd_pool_stats(args: argparse.Namespace) -> int:
     )
     for item in stats["keys"]:
         state = "可用" if item["available"] else f"冷却 {item['cooling_down_for']}s"
+        credits = item.get("credits")
+        # 额度必须在这里露出来：`pool ls` 有、`pool stats` 没有，两视图不一致会让人以为额度丢了
+        credit_txt = "不限" if credits == -1 else ("-" if credits is None else str(credits))
         print(
-            f"  {item['label']:<24} {state:<12}  连续失败 {item['consecutive_failures']}  "
-            f"{item['usage']}"
+            f"  {item['label']:<24} {state:<12}  额度 {credit_txt:<6} "
+            f"连续失败 {item['consecutive_failures']}  {item['usage']}"
         )
     print(f"合计：{stats['totals']}")
     return 0

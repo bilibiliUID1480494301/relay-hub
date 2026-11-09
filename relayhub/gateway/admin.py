@@ -2092,6 +2092,10 @@ def main(argv: list[str] | None = None) -> int:
         description="号池管理面（本地网页，独立进程 + 独立端口）",
     )
     parser.add_argument("--pool", type=Path, default=None, help="号池文件（默认与网关同一个）")
+    parser.add_argument(
+        "--tokens", type=Path, default=None, dest="tokens",
+        help="令牌文件（与 serve 保持一致；默认 %%LOCALAPPDATA%%/relay-hub/tokens.json）",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8801)
     parser.add_argument(
@@ -2122,6 +2126,7 @@ def main(argv: list[str] | None = None) -> int:
         server = AdminServer(
             (args.host, args.port), pool_path, args.token,
             totp_secret=args.totp_secret, verbose=args.verbose,
+            tokens_path=args.tokens,
         )
     except ValueError as exc:
         print(f"错误：{exc}", file=sys.stderr)

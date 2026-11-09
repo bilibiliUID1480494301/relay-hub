@@ -328,8 +328,15 @@ class KeyPool:
         if not Path(path).is_file():
             return cls([], **kwargs)  # type: ignore[arg-type]
         try:
-            # 走 secretbox：历史明文（无 enc 字段）自动兼容，下次 save 升级为加密
-            raw = secretbox.unseal(Path(path))
+            # 走 secretbox：历史明文（无 enc 字段）自动兼容，下次 save 升级为加密。
+            # 带重试：Windows 上 os.replace 与读者 open 撞车会抛共享冲突，
+            # 单次失败就返回空池会把「替换瞬间」变成一次假撕读。
+            raw = None
+            for attempt in range(4):
+                raw = secretbox.unseal(Path(path))
+                if raw is not None:
+                    break
+                time.sleep(0.002 * (attempt + 1))
             if raw is None:
                 raise ValueError("unreadable")
         except (OSError, json.JSONDecodeError, ValueError):
