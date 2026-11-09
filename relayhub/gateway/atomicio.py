@@ -37,3 +37,12 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         # replace 成功后 tmp 已不存在；写失败时清理，避免残留垃圾
         if tmp.exists():
             tmp.unlink()
+
+
+def ensure_private(path: Path) -> None:
+    """把已存在的文件收紧到 0600。追加写无法先写临时文件，只能写后收紧。"""
+    try:
+        if os.name == "posix":
+            os.chmod(Path(path), 0o600)
+    except OSError:
+        pass

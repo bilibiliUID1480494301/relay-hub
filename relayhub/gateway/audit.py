@@ -21,6 +21,8 @@ README「五」管理面缺口的第三条：出事之前只有「当前状态�
 from __future__ import annotations
 
 import json
+
+from .atomicio import ensure_private
 import sys
 import time
 from pathlib import Path
@@ -35,6 +37,7 @@ def record(event: str, *, path: Path | None = None, **detail: Any) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+            ensure_private(target)   # 追加写只能写后收紧到 0600
     except OSError as exc:
         print(f"警告：审计写入失败（{exc}）：{entry}", file=sys.stderr)
 
