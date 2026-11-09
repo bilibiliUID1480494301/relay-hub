@@ -309,12 +309,27 @@ class TokenPool:
 
     # -- 鉴权与记账 ------------------------------------------------------
 
+    def _hash_index(self) -> dict[str, DownstreamToken]:
+        """按 token_hash 建索引；令牌数量变化（增删/重载）时自动重建。"""
+        index = getattr(self, "_hash_cache", None)
+        if index is None or len(index) != len(self.tokens):
+            index = {tok.token_hash: tok for tok in self.tokens if tok.token_hash}
+            self._hash_cache = index
+        return index
+
     def find(self, secret: str) -> DownstreamToken | None:
         """按凭证全文找令牌：先比对 SHA-256（哈希存储），再兼容遗留明文。
         恒定时间比较，逐个比——令牌数量级是「设备数」，不是千级。"""
         if not secret:
             return None
         secret_hash = hash_token(secret)
+        # 哈希索引：O(1) 定位候选，再对候选做一次恒定时间比较。
+        # 逐个 compare_digest 是 O(n·len)：设备多起来每条请求都要走一遍。
+        candidate = self._hash_index().get(secret_hash)
+        if candidate is not None and candidate.token_hash and hmac.compare_digest(
+            candidate.token_hash, secret_hash
+        ):
+            return candidate
         for token in self.tokens:
             if token.token_hash and hmac.compare_digest(token.token_hash, secret_hash):
                 return token
