@@ -328,7 +328,10 @@ class KeyPool:
         if not Path(path).is_file():
             return cls([], **kwargs)  # type: ignore[arg-type]
         try:
-            raw = json.loads(Path(path).read_text(encoding="utf-8"))
+            # 走 secretbox：历史明文（无 enc 字段）自动兼容，下次 save 升级为加密
+            raw = secretbox.unseal(Path(path))
+            if raw is None:
+                raise ValueError("unreadable")
         except (OSError, json.JSONDecodeError, ValueError):
             # 半截/被删的号池文件：返回空池而不是抛错。调用方（ReloadingRouter）已在
             # 指纹层判过「读不到 ≠ 配置变了」，这里的兜底是最后一道防线——
@@ -357,7 +360,7 @@ class KeyPool:
             "config_epoch": self.config_epoch,
             "keys": [key.to_dict() for key in self.keys],
         }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        secretbox.seal(payload, path=path)
 
     # -- 增删改 ----------------------------------------------------------
 

@@ -225,3 +225,29 @@ modalities / ratio / completion_ratio` 规范化后 sha256 前 16 位），只�
 - 安装用 `pip install --no-deps --force-reinstall --no-input`，不动依赖、不交互
 - 装完写 `restart.flag`，**由外部 keepalive 拉起新进程**；服务自己不退出（避免无人接管的空窗）
 - 历史保留最近 5 版 wheel，装坏可回滚
+
+
+## 静态密钥保护（0.12.1）
+
+| 文件 | 落盘方式 |
+|---|---|
+| `pool.json`（上游 Key） | **secretbox 密封**（DPAPI / 降级明文+`enc` 标记），0600 |
+| `tokens.json` / `policy.json` / `pairing.json` | 同上 |
+| 数据根 | **0700** |
+| 历史明文 | `unseal()` 自动兼容，下次写入自动升级为密封，无需迁移脚本 |
+
+`config_fingerprint()` 改为**解封后按内容算**——否则密文每次都不同，指纹永远在变，
+会退化成每请求 reload（round-robin 游标被反复重置）。
+
+
+## 静态密钥保护（0.12.1）
+
+| 文件 | 落盘方式 |
+|---|---|
+| `pool.json`（上游 Key） | **secretbox 密封**（DPAPI / 降级明文+`enc` 标记），0600 |
+| `tokens.json` / `policy.json` / `pairing.json` | 同上 |
+| 数据根 | **0700** |
+| 历史明文 | `unseal()` 自动兼容，下次写入自动升级为密封，无需迁移脚本 |
+
+`config_fingerprint()` 改为**解封后按内容算**——否则密文每次都不同，指纹永远在变，
+会退化成每请求 reload（round-robin 游标被反复重置）。

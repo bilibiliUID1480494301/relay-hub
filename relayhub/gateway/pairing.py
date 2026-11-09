@@ -33,6 +33,8 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import json
+
+from . import secretbox
 import secrets
 import time
 import uuid
@@ -241,7 +243,9 @@ def _sanitize_device_name(raw: str) -> str:
 
 def _read_window(path: Path) -> dict[str, Any] | None:
     try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        raw = secretbox.unseal(Path(path))
+        if raw is None:
+            raise ValueError("unreadable")
     except (OSError, json.JSONDecodeError, ValueError):
         return None
     return raw if isinstance(raw, dict) else None

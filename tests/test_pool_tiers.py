@@ -167,8 +167,10 @@ def test_new_fields_roundtrip_through_disk(tmp_path: Path) -> None:
     pool = KeyPool([key])
     pool.save(path)
 
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    assert raw["cooldown_tiers"] == {TIER_PLAN: 43200.0, TIER_SOFT: 60.0, TIER_ERR: 600.0}
+    from relayhub.gateway import secretbox
+
+    raw = secretbox.unseal(path)
+    assert raw is not None and raw["cooldown_tiers"] == {TIER_PLAN: 43200.0, TIER_SOFT: 60.0, TIER_ERR: 600.0}
 
     restored = KeyPool.load(path).keys[0]
     assert restored.credits == 42

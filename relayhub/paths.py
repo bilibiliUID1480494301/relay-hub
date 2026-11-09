@@ -17,6 +17,16 @@ ENV_RELAYHUB_HOME = "RELAYHUB_HOME"
 
 
 
+def _harden_home(path: Path) -> Path:
+    """数据根 0700：同机其他用户连目录都进不去（否则 600 文件也能被猜到路径）。"""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+    return path
+
+
 def relayhub_home() -> Path:
     """中转站自己的数据根。
 
@@ -25,7 +35,7 @@ def relayhub_home() -> Path:
     """
     override = os.environ.get(ENV_RELAYHUB_HOME, "").strip()
     if override:
-        return Path(override).expanduser()
+        return _harden_home(Path(override).expanduser())
     base = os.environ.get("LOCALAPPDATA", "").strip()
     root = Path(base) if base else Path.home() / ".local" / "share"
     return root / "relay-hub"

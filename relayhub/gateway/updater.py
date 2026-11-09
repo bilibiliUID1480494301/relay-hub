@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,17 @@ from . import signing
 from .signing_key import PUBLIC_KEY_B64
 
 UA = "relayhub-updater"
+
+
+VERSION_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}$")
+
+
+def check_version(version: str) -> str:
+    """版本号会拼进落盘文件名和下载 URL：只允许 x.y.z，杜绝 ../ 与换行注入。"""
+    text = str(version or "").strip()
+    if not VERSION_RE.match(text):
+        raise ValueError("版本号必须形如 1.2.3")
+    return text
 
 
 def release_base(version: str, repo: str = "bilibiliUID1480494301/relay-hub") -> str:
@@ -64,6 +76,7 @@ def verify_or_force(
 
 def stage(version: str, cache_dir: Path, timeout: float = 30.0, force: bool = False) -> dict[str, Any]:
     """下载清单+签名+wheel 并验证。返回 {ok, wheel, sha256, error}。"""
+    version = check_version(version)
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     base = release_base(version)

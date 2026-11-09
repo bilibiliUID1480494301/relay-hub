@@ -182,7 +182,7 @@ class Station:
     def _guess_protocol(base_url: str, protocol: str | None) -> str:
         if protocol:
             p = protocol.lower()
-            if p in (PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI_CHAT):
+            if p in SUPPORTED_PROTOCOLS:   # 用常量，别再手写二元组：漏过 gemini-api 导致报错自相矛盾
                 return p
             raise ValueError(
                 f"protocol must be one of {SUPPORTED_PROTOCOLS}, got {protocol!r}"

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+
+from . import secretbox
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,8 +76,11 @@ class PolicyStore:
     def _load(self) -> _State:
         state = _State()
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            raw = secretbox.unseal(self.path)
+            if raw is None:
+                raise ValueError("unreadable")
+        except (OSError, json.JSONDecodeError, ValueError):
+            # 文件不存在/读不到/解不开：一律按「无策略」放行，别把请求全拦死
             return state
         if not isinstance(raw, dict):
             return state

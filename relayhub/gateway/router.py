@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+
+from . import secretbox
 import re
 import threading
 import time
@@ -523,7 +525,11 @@ def config_fingerprint(path: Path) -> object:
                         并发下每次空读都触发一次 reload → 500。）
     """
     try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        # 必须解封后再算：加密落盘后每次密文都不同，按字节算会让指纹永远在变，
+        # 变成「每请求 reload」——round-robin 游标被反复重置，轮询退化成永远挑第一个。
+        raw = secretbox.unseal(Path(path))
+        if raw is None:
+            raise ValueError("unreadable")
     except (OSError, json.JSONDecodeError, ValueError):
         return _UNREADABLE
     if not isinstance(raw, dict):

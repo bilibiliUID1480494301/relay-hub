@@ -24,10 +24,17 @@ def test_scrub_secrets_removes_credentials():
     assert "***" in cleaned
 
 
-def test_pool_save_is_atomic_and_private(tmp_path: Path):
+def test_pool_save_is_encrypted_at_rest(tmp_path: Path):
+    """号池落盘必须**不含明文密钥**：这是审计点名的 P0，光靠 chmod 不够。"""
+    from relayhub.gateway import secretbox
+
     path = tmp_path / "pool.json"
     KeyPool([UpstreamKey(key_id="k1", label="l", base_url="https://x", api_key="sk-secret")]).save(path)
-    assert json.loads(path.read_text(encoding="utf-8"))["keys"][0]["key_id"] == "k1"
+
+    blob = json.loads(path.read_text(encoding="utf-8"))
+    assert blob.get("enc"), "号池必须是密封文档（含 enc 字段）"
+    assert b"sk-secret" not in path.read_bytes(), "明文密钥不得出现在磁盘上"
+    assert secretbox.unseal(path)["keys"][0]["key_id"] == "k1"
     if os.name == "posix":
         assert oct(path.stat().st_mode)[-3:] == "600"
 

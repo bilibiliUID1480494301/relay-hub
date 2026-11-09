@@ -27,6 +27,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+
+from . import secretbox
 import re
 import secrets
 import threading
@@ -211,7 +213,9 @@ def _fingerprint(path: Path) -> object:
     重载一次；文件正被写的瞬间更会 reload 到半截内容而抛 JSONDecodeError。
     """
     try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        raw = secretbox.unseal(Path(path))
+        if raw is None:
+            raise ValueError("unreadable")
     except (OSError, json.JSONDecodeError, ValueError):
         return _UNREADABLE
     if not isinstance(raw, dict):
@@ -243,7 +247,9 @@ class TokenPool:
         if not path.is_file():
             return cls([])
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = secretbox.unseal(path)
+            if raw is None:
+                raise ValueError("unreadable")
         except (OSError, json.JSONDecodeError, ValueError):
             # 正在被重写的瞬间读到半截：返回空池，别让并发请求炸成 500。
             return cls([])
@@ -256,7 +262,7 @@ class TokenPool:
             "schemaVersion": SCHEMA_VERSION,
             "tokens": [t.to_dict() for t in self.tokens],
         }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        secretbox.seal(payload, path=path)
 
     # -- 增删改 ----------------------------------------------------------
 
