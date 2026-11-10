@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -146,7 +147,10 @@ def request_restart(flag_path: Path, version: str) -> Path:
     """写重启标记。**不在服务里自杀**：由 keepalive 看到标记后拉起新进程。"""
     flag_path = Path(flag_path)
     flag_path.parent.mkdir(parents=True, exist_ok=True)
-    flag_path.write_text(json.dumps({"version": version, "at": int(time.time())}), encoding="utf-8")
+    flag_path.write_text(
+        json.dumps({"version": version, "at": int(time.time()), "pid": os.getpid()}),
+        encoding="utf-8",
+    )
     return flag_path
 
 

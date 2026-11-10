@@ -227,3 +227,22 @@ def test_update_install_is_owner_only(tmp_path):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_deploy_check_is_read_only_and_leaks_no_secrets(tmp_path):
+    srv = _server(tmp_path)
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        req = urllib.request.Request(base + "/api/deploy/check")
+        req.add_header("X-Admin-Token", "t")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        assert data["port"] == srv.server_address[1]
+        assert data["python"].count(".") == 2
+        assert "restart_pending" in data
+        blob = json.dumps(data, ensure_ascii=False).lower()
+        for secret in ("api_key", "sk-", "password", "token_hash"):
+            assert secret not in blob
+    finally:
+        srv.shutdown()
+        srv.server_close()

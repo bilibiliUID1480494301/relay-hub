@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 import hmac
 import json
+import sys
+import importlib.util
 import re
 import secrets
 import sys
@@ -555,6 +557,12 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._error(401, "缺少或错误的 token")
                 return
             self._send_json(200, self._state())
+            return
+        if path == "/api/deploy/check":
+            if not self._authorized():
+                self._error(401, "缺少或错误的 token")
+                return
+            self._send_json(200, self._deploy_check())
             return
         if path == "/api/security":
             if not self._authorized():
@@ -1556,6 +1564,33 @@ class AdminHandler(BaseHTTPRequestHandler):
             200 if outcome["ok"] else 500,
             {"rolled_back_to": previous.get("version", ""), "install": outcome, "restart_pending": outcome["ok"]},
         )
+
+    def _deploy_check(self) -> dict[str, Any]:
+        """部署体检：只读，不含任何凭据。给客户端判断「这台机器还缺什么」。"""
+        home = paths.relayhub_home()
+        flag = paths.audit_path().parent / "restart.flag"
+        try:
+            mode = oct(home.stat().st_mode)[-3:] if home.exists() else ""
+        except OSError:
+            mode = ""
+        pending = None
+        if flag.is_file():
+            try:
+                pending = json.loads(flag.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pending = {"unreadable": True}
+        return {
+            "version": relayhub_version,
+            "api_compat": API_COMPAT,
+            "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            "executable": sys.executable,
+            "home": str(home),
+            "home_mode": mode,
+            "pool_exists": self.pool_path.is_file(),
+            "port": self.server.server_address[1],  # type: ignore[attr-defined]
+            "restart_pending": pending,
+            "cryptography": bool(importlib.util.find_spec("cryptography")),
+        }
 
     def _security_state(self) -> dict[str, Any]:
         """安全公告 + 版本检查，结果缓存 6 小时（别每次刷新都打 GitHub/PyPI）。"""
