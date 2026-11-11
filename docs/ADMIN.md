@@ -314,3 +314,21 @@ modalities / ratio / completion_ratio` 规范化后 sha256 前 16 位），只�
 - 令牌只导出 SHA-256 哈希：迁移后旧 `rht_…` 仍可用，但迁移包里拿不到可用凭证
 - 导入**只增不改**：同名用户跳过（不覆盖密码与额度）、同哈希令牌跳过
 - 带密钥的包**不允许在线导入**（返回 400）：运行中替换上游 Key 风险太高，停机用 CLI 导
+
+## 服务器状态
+
+`GET /api/server/status`（任意已认证）：pid / python / platform / uptime / 线程数 / 负载 /
+内存 / 数据盘容量 / 数据根体积与文件数 / 号池 Key 数。
+
+- `psutil` 是**可选依赖**：有它出 RSS/系统内存，没有则 `memory.source = "none"` 其余照常
+- Windows 没有 `os.getloadavg`，`load1` 为 `null`（不是 0，别误导成「无负载」）
+- 数据根体积统计上限 2 万个文件，避免大目录拖死请求
+
+## 服务器状态
+
+`GET /api/server/status`（任意已认证）：pid / python / platform / uptime / 线程数 / 负载 /
+内存 / 数据盘容量 / 数据根体积与文件数 / 号池 Key 数。
+
+- `psutil` 是**可选依赖**：有它出 RSS/系统内存，没有则 `memory.source = "none"` 其余照常
+- Windows 没有 `os.getloadavg`，`load1` 为 `null`（不是 0，别误导成「无负载」）
+- 数据根体积统计上限 2 万个文件，避免大目录拖死请求

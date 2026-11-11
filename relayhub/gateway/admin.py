@@ -40,6 +40,7 @@ from . import migrate as migrate_module
 from . import users as user_module
 from . import tokens as token_module
 from . import security as security_module
+from . import serverstat as serverstat_module
 from . import updater as updater_module
 from .compat import API_COMPAT
 from . import scopes as scope_module
@@ -560,6 +561,12 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._error(401, "缺少或错误的 token")
                 return
             self._send_json(200, self._state())
+            return
+        if path == "/api/server/status":
+            if not self._authorized():
+                self._error(401, "缺少或错误的 token")
+                return
+            self._send_json(200, self._server_status())
             return
         if path == "/api/deploy/check":
             if not self._authorized():
@@ -1650,6 +1657,11 @@ class AdminHandler(BaseHTTPRequestHandler):
             )
         self._send_json(200, result)
 
+    def _server_status(self) -> dict[str, Any]:
+        data = serverstat_module.status(paths.relayhub_home(), self.server.started_at)  # type: ignore[attr-defined]
+        data["pool_keys"] = len(KeyPool.load(self.pool_path).keys)
+        return data
+
     def _deploy_check(self) -> dict[str, Any]:
         """部署体检：只读，不含任何凭据。给客户端判断「这台机器还缺什么」。"""
         home = paths.relayhub_home()
@@ -2148,6 +2160,7 @@ class AdminServer(ThreadingHTTPServer):
         super().__init__(address, AdminHandler)
         self.pool_path = Path(pool_path)
         self.token = token
+        self.started_at = time.time()
         # SSE 单例广播器状态
         self.events_lock = threading.Lock()
         self.events_subs: list[queue.Queue[str]] = []

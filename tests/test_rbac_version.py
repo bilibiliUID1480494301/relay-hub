@@ -267,3 +267,26 @@ def test_migration_endpoints_are_owner_only(tmp_path):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_server_status_is_authenticated_and_secret_free(tmp_path):
+    srv = _server(tmp_path)
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        req = urllib.request.Request(base + "/api/server/status")
+        req.add_header("X-Admin-Token", "t")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        assert data["pid"] > 0 and "memory" in data and "disk" in data
+        blob = json.dumps(data, ensure_ascii=False).lower()
+        for secret in ("api_key", "sk-", "password", "token_hash"):
+            assert secret not in blob
+
+        try:
+            urllib.request.urlopen(base + "/api/server/status", timeout=5)
+            assert False, "无凭据不该能读服务器状态"
+        except urllib.error.HTTPError as e:
+            assert e.code == 401
+    finally:
+        srv.shutdown()
+        srv.server_close()
