@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+from . import persist
 from . import secretbox
 import re
 import threading
@@ -457,9 +458,23 @@ class KeyPoolRouter:
             )
             self._persist()
 
+    def _writer(self):
+        """缓存 writer：每请求都 resolve 路径在 Windows 上要 stat，200 次就 50ms+。"""
+        writer = self.__dict__.get("_persist_writer")
+        if writer is None:
+            writer = persist.writer_for(self.persist_path, lambda path: self.pool.save(path))
+            self.__dict__["_persist_writer"] = writer
+        return writer
+
     def _persist(self) -> None:
+        """请求路径只打脏标记。真正的写盘交给 persist 的后台线程批量做。"""
         if self.persist_path:
-            self.pool.save(self.persist_path)
+            self._writer().mark()
+
+    def flush(self) -> None:
+        """显式落盘：退出前、或管理面要读到最新用量时调用。"""
+        if self.persist_path:
+            self._writer().flush()
 
     def _no_candidate_reason(self, model: str) -> str:
         if not self.pool.keys:

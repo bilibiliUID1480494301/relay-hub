@@ -39,6 +39,7 @@ from .. import __version__ as _version
 from . import migrate as migrate_module
 from . import users as user_module
 from . import tokens as token_module
+from . import persist as persist_module
 from . import security as security_module
 from . import serverstat as serverstat_module
 from . import updater as updater_module
@@ -496,6 +497,8 @@ class AdminHandler(BaseHTTPRequestHandler):
     # -- 号池读写 --------------------------------------------------------
 
     def _state(self) -> dict[str, Any]:
+        # 请求路径是延迟落盘的：管理面要看到最新用量，先冲一次
+        persist_module.flush_all()
         now = time.time()
         pool = KeyPool.load(self.pool_path)
         return {

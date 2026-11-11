@@ -205,10 +205,10 @@ def _cmd_serve(argv: list[str]) -> int:
     parser.add_argument(
         "--ip-rpm",
         type=int,
-        default=60,
+        default=600,
         dest="ip_rpm",
         help="单 IP 每分钟请求上限（对 /v1 推理端点生效，鉴权前拦截；0=关闭）。"
-        "公网/NAT 场景防单出口刷请求",
+        "默认 600：局域网/NAT 下多台设备共用一个出口 IP，60 会把正常流量打成 429",
     )
     parser.add_argument(
         "--max-concurrency",
