@@ -102,7 +102,7 @@ SESSION_TTL = 86400.0
 
 # 登录页：只在设置了 token 的管理面上出现；回环信任模式直接进面板。
 LOGIN_HTML = """<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>__SITE__ 管理面登录</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>__SITE__ 管理面登录</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M9 23V9h5l9 9v5h-5l-9-9v9z' fill='%23fff'/%3E%3C/svg%3E">
 <style>
  body{font-family:system-ui,sans-serif;display:flex;justify-content:center;padding-top:18vh;background:#111;color:#eee}
  form{background:#1c1c1e;padding:2rem 2.5rem;border-radius:12px;min-width:320px}
@@ -2190,7 +2190,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__SITE__ · 控制台</title>
+<title>__SITE__ · 控制台</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M9 23V9h5l9 9v5h-5l-9-9v9z' fill='%23fff'/%3E%3C/svg%3E">
 <style>
 :root{--bg:#F7F6F3;--panel:#FFFFFF;--fg:#26215C;--muted:#5F5E5A;--line:#E3E1DA;
 --accent:#185FA5;--accent-soft:#E6F1FB;--ok:#0F6E56;--ok-soft:#E1F5EE;--warn:#854F0B;
@@ -3662,6 +3662,18 @@ switchTab('clients');
   btn.onclick = function(){ en = !en; btn.textContent = en ? '中文' : 'EN'; walk(document.body); };
   var h = document.querySelector('header');
   if (h) h.appendChild(btn);
+})();
+// 退出登录：后端早就有 /logout，页面一直没给入口——会话只能等过期才能清
+(function(){
+  var h = document.querySelector('header');
+  if (!h) return;
+  var out = document.createElement('button');
+  out.textContent = '退出登录';
+  out.className = 'ghost';
+  out.onclick = function(){
+    fetch('/logout', {method: 'POST'}).then(function(){ location.reload(); });
+  };
+  h.appendChild(out);
 })();
 </script>
 </body>

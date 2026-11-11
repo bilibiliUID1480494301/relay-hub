@@ -251,3 +251,36 @@ modalities / ratio / completion_ratio` 规范化后 sha256 前 16 位），只�
 
 `config_fingerprint()` 改为**解封后按内容算**——否则密文每次都不同，指纹永远在变，
 会退化成每请求 reload（round-robin 游标被反复重置）。
+
+## 端点总表（0.12.x）
+
+| 端点 | 方法 | 权限 | 用途 |
+|---|---|---|---|
+| `/api/state` | GET | 任意已认证 | 号池全景、协议集、角色 |
+| `/api/tokens` | GET | `token:read` | 令牌列表（不含明文） |
+| `/api/users` | GET/POST | `user:read` / `user:write` | 用户、额度发放、角色与 scopes |
+| `/api/codes` | GET/POST | `code:*` | 兑换码 |
+| `/api/requests` | GET | `logs:read` | 请求日志（reason 已脱敏） |
+| `/api/usage` | GET | `logs:read` | 用量汇总 |
+| `/api/audit` | GET | `logs:read` | 审计流水（含 `admin.denied`/`update.forced`） |
+| `/api/plugin-costs` | GET | 任意已认证 | 按插件聚合用量（**无成本字段**） |
+| `/api/security` | GET | 任意已认证 | GHSA + CVE + 是否有新版（缓存 6h） |
+| `/api/deploy/check` | GET | 任意已认证 | 部署体检：版本/python/数据根权限/端口/restart 待处理 |
+| `/api/events` | GET | 任意已认证 | SSE：hello / state.changed / channel.cooldown / channel.recovered |
+| `/api/theme` | POST | `config:write` | 主题（仅 `#rgb`/`#rrggbb` 与 http(s) Logo） |
+| `/api/update/install` | POST | **仅 owner** | 下载→验签→安装；验签失败 409，`force:true` 需 ≥8 字理由并记审计 |
+| `/api/update/rollback` | POST | **仅 owner** | 回滚上一版（`updates/history.json`，保留 5 版） |
+| `/logout` | POST | 已登录 | 清会话（控制台右上角有按钮） |
+
+## TOTP 的定位（明确一下）
+
+- **只在启动时给了 `--totp-secret` 才启用**，是管理面登录的第二个因子，不是用户级 2FA
+- 校验回环 + 时间窗容错；没配 shared secret 时**不显示输入框**
+- 它保护的是「拿到面板密码的人」，不保护 API 调用——API 走 token/scopes
+
+## 插件与密钥的关系（现实说明）
+
+- 插件（如 `dsh-relayhub-bridge`）用**下游令牌**（`rht_…`）认证，等价于一个设备凭证
+- 令牌可吊销、可限速、可限额；但**没有 OAuth 式「授权—退出」流程**，退出 = 吊销令牌
+- 插件用量记录在 `pluginlogs/<plugin>/<date>.jsonl`，管理端 `/api/plugin-costs` 聚合的是
+  **运营视角**（谁在调、失败率、延迟），不是给终端用户看的账单
