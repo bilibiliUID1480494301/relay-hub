@@ -284,3 +284,33 @@ modalities / ratio / completion_ratio` 规范化后 sha256 前 16 位），只�
 - 令牌可吊销、可限速、可限额；但**没有 OAuth 式「授权—退出」流程**，退出 = 吊销令牌
 - 插件用量记录在 `pluginlogs/<plugin>/<date>.jsonl`，管理端 `/api/plugin-costs` 聚合的是
   **运营视角**（谁在调、失败率、延迟），不是给终端用户看的账单
+
+## 迁移（导出/导入）
+
+| 端点 | 权限 | 说明 |
+|---|---|---|
+| `POST /api/export` | **仅 owner** | `{include_secrets?, password?}` → 迁移包 JSON |
+| `POST /api/import` | **仅 owner** | `{bundle, dry_run?}`；**默认 dry_run=true** |
+
+设计取舍：
+
+- **默认不导出上游 Key**。要带密钥必须 `include_secrets:true` + 口令（≥8 位），
+  导出的是 scrypt+AES-GCM 密文（`pool_sealed`），不是明文
+- 令牌只导出 SHA-256 哈希：迁移后旧 `rht_…` 仍可用，但迁移包里拿不到可用凭证
+- 导入**只增不改**：同名用户跳过（不覆盖密码与额度）、同哈希令牌跳过
+- 带密钥的包**不允许在线导入**（返回 400）：运行中替换上游 Key 风险太高，停机用 CLI 导
+
+## 迁移（导出/导入）
+
+| 端点 | 权限 | 说明 |
+|---|---|---|
+| `POST /api/export` | **仅 owner** | `{include_secrets?, password?}` → 迁移包 JSON |
+| `POST /api/import` | **仅 owner** | `{bundle, dry_run?}`；**默认 dry_run=true** |
+
+设计取舍：
+
+- **默认不导出上游 Key**。要带密钥必须 `include_secrets:true` + 口令（≥8 位），
+  导出的是 scrypt+AES-GCM 密文（`pool_sealed`），不是明文
+- 令牌只导出 SHA-256 哈希：迁移后旧 `rht_…` 仍可用，但迁移包里拿不到可用凭证
+- 导入**只增不改**：同名用户跳过（不覆盖密码与额度）、同哈希令牌跳过
+- 带密钥的包**不允许在线导入**（返回 400）：运行中替换上游 Key 风险太高，停机用 CLI 导

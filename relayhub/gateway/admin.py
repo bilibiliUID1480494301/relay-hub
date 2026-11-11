@@ -36,6 +36,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .. import __version__ as relayhub_version
 from .. import __version__ as _version
+from . import migrate as migrate_module
+from . import users as user_module
+from . import tokens as token_module
 from . import security as security_module
 from . import updater as updater_module
 from .compat import API_COMPAT
@@ -642,6 +645,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             ["api", "keys"], ["api", "tokens"],
             ["api", "users"], ["api", "codes"], ["api", "policy"],
             ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"], ["api", "fingerprint"], ["api", "announcement"], ["api", "theme"], ["api", "update"],
+            ["api", "export"], ["api", "import"],
             ["api", "events"],
         ) or parts in (
             ["api", "settings"], ["api", "webui"],
@@ -659,6 +663,20 @@ class AdminHandler(BaseHTTPRequestHandler):
                 )
                 self._error(403, f"权限不足：需要 {needed}")
                 return
+
+        if parts == ["api", "export"] and method == "POST":
+            if self.role != "owner":
+                self._error(403, "只有站长可以导出迁移包")
+                return
+            self._export_bundle()
+            return
+
+        if parts == ["api", "import"] and method == "POST":
+            if self.role != "owner":
+                self._error(403, "只有站长可以导入迁移包")
+                return
+            self._import_bundle()
+            return
 
         if parts == ["api", "update", "rollback"] and method == "POST":
             self._update_rollback()
@@ -1564,6 +1582,73 @@ class AdminHandler(BaseHTTPRequestHandler):
             200 if outcome["ok"] else 500,
             {"rolled_back_to": previous.get("version", ""), "install": outcome, "restart_pending": outcome["ok"]},
         )
+
+    def _export_bundle(self) -> None:
+        """导出迁移包。口令走请求体，**不进 URL**（URL 会进日志与浏览器历史）。"""
+        body = self._read_json() or {}
+        include = bool(body.get("include_secrets"))
+        password = str(body.get("password") or "")
+        users_pool = user_module.UserPool.load(self.server.users_path)  # type: ignore[attr-defined]
+        token_pool = token_module.TokenPool.load(self.server.tokens_path)  # type: ignore[attr-defined]
+        site_cfg = site_module.load_site(paths.site_path())
+        pool_obj = KeyPool.load(self.pool_path)
+        try:
+            bundle = migrate_module.export_bundle(
+                [u.to_dict() for u in users_pool.users],
+                [tk.to_dict() for tk in token_pool.tokens],
+                asdict(site_cfg),
+                include_secrets=include,
+                pool=[k.to_dict() for k in pool_obj.keys] if include else None,
+                password=password,
+            )
+        except migrate_module.MigrateError as exc:
+            self._error(400, str(exc))
+            return
+        audit_module.record(
+            "migrate.export", path=self.server.audit_path,  # type: ignore[attr-defined]
+            include_secrets=str(include),
+        )
+        self._send_json(200, bundle)
+
+    def _import_bundle(self) -> None:
+        body = self._read_json() or {}
+        bundle = body.get("bundle")
+        dry_run = bool(body.get("dry_run", True))     # 默认只预演，避免误一键覆盖
+        problems = migrate_module.validate_bundle(bundle)
+        if problems:
+            self._error(400, "；".join(problems))
+            return
+        if bundle.get("include_secrets"):
+            self._error(
+                400,
+                "带密钥的包不能直接导入：请用 CLI 在停机状态下导入，避免运行中替换上游 Key",
+            )
+            return
+        users_path = self.server.users_path  # type: ignore[attr-defined]
+        tokens_path = self.server.tokens_path  # type: ignore[attr-defined]
+        users_pool = user_module.UserPool.load(users_path)
+        token_pool = token_module.TokenPool.load(tokens_path)
+        merged_users, skipped_users = migrate_module.merge_users(
+            [u.to_dict() for u in users_pool.users], bundle.get("users") or []
+        )
+        merged_tokens, skipped_tokens = migrate_module.merge_tokens(
+            [tk.to_dict() for tk in token_pool.tokens], bundle.get("tokens") or []
+        )
+        result = {
+            "dry_run": dry_run,
+            "users_added": len(merged_users) - len(users_pool.users),
+            "tokens_added": len(merged_tokens) - len(token_pool.tokens),
+            "skipped_users": skipped_users,
+            "skipped_tokens": skipped_tokens,
+        }
+        if not dry_run:
+            user_module.UserPool([user_module.User.from_dict(u) for u in merged_users]).save(users_path)
+            token_module.TokenPool([token_module.DownstreamToken.from_dict(tk) for tk in merged_tokens]).save(tokens_path)
+            audit_module.record(
+                "migrate.import", path=self.server.audit_path,  # type: ignore[attr-defined]
+                users=str(result["users_added"]), tokens=str(result["tokens_added"]),
+            )
+        self._send_json(200, result)
 
     def _deploy_check(self) -> dict[str, Any]:
         """部署体检：只读，不含任何凭据。给客户端判断「这台机器还缺什么」。"""

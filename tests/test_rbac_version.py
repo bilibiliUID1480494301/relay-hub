@@ -246,3 +246,24 @@ def test_deploy_check_is_read_only_and_leaks_no_secrets(tmp_path):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_migration_endpoints_are_owner_only(tmp_path):
+    """迁移包含全体账号：admin 不能导出，也不能导入。"""
+    srv = _server(tmp_path)
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        srv.sessions["sid-adm"] = {"exp": time.time() + 300, "role": "admin", "user": "ops",
+                                   "scopes": ["config:write", "user:write"]}
+        for path, payload in (("/api/export", {}), ("/api/import", {"bundle": {}})):
+            req = urllib.request.Request(base + path, data=json.dumps(payload).encode(), method="POST")
+            req.add_header("Content-Type", "application/json")
+            req.add_header("Cookie", f"{SESSION_COOKIE}=sid-adm")
+            try:
+                urllib.request.urlopen(req, timeout=5)
+                assert False, f"{path} 不该对 admin 开放"
+            except urllib.error.HTTPError as e:
+                assert e.code == 403
+    finally:
+        srv.shutdown()
+        srv.server_close()
