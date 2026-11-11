@@ -1660,6 +1660,8 @@ class AdminHandler(BaseHTTPRequestHandler):
     def _server_status(self) -> dict[str, Any]:
         data = serverstat_module.status(paths.relayhub_home(), self.server.started_at)  # type: ignore[attr-defined]
         data["pool_keys"] = len(KeyPool.load(self.pool_path).keys)
+        # 版本对 admin 隐藏（与 /api/state 同一规则），owner 才看得见
+        data["version"] = relayhub_version if self.role == "owner" else "hidden"
         return data
 
     def _deploy_check(self) -> dict[str, Any]:
@@ -2387,8 +2389,38 @@ display:none;border:1px solid var(--line);background:var(--panel)}
   <button data-tab="plugins">插件</button>
   <button data-tab="toip">动态口令</button>
   <button data-tab="theme">外观</button>
+  <button data-tab="server">服务器</button>
+  <button data-tab="migrate">迁移</button>
   <button data-tab="audit">审计</button>
 </nav>
+
+<div class="pane" id="pane-server" style="display:none">
+<section class="panel">
+  <h2>服务器状态</h2>
+  <p class="hint">进程与机器概况。内存细节需要服务端装 psutil，没有则显示「不可用」而不是 0。</p>
+  <div style="overflow-x:auto"><table>
+    <thead><tr><th>项</th><th>值</th></tr></thead><tbody id="sv-rows"></tbody>
+  </table></div>
+</section>
+</div>
+
+<div class="pane" id="pane-migrate" style="display:none">
+<section class="panel">
+  <h2>站点迁移</h2>
+  <p class="hint">导出用户、令牌（仅哈希）与站点设置。<b>默认不含上游 Key</b>；要带密钥必须填口令，导出的是加密块。导入默认只预演，确认后再写入。</p>
+  <div class="row">
+    <button id="mg-export">导出迁移包</button>
+    <input id="mg-pass" type="password" placeholder="口令（含密钥时必填，≥8 位）" style="min-width:240px">
+    <label style="margin-left:12px"><input id="mg-secrets" type="checkbox"> 包含上游 Key</label>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <input id="mg-file" type="file" accept="application/json">
+    <button id="mg-dry">预演导入</button>
+    <button id="mg-apply">确认导入</button>
+    <span class="hint" id="mg-msg"></span>
+  </div>
+</section>
+</div>
 
 <div class="pane" id="pane-clients" style="display:none">
 <section class="cards" id="cl-cards"></section>
@@ -2987,11 +3019,83 @@ function loadPane(name){
   if(name==='toip'){loadToip();return;}
   if(name==='theme'){loadTheme();return;}
   if(name==='audit'){loadAudit();return;}
+  if(name==='server'){loadServer();return;}
+  if(name==='migrate'){mgInit();return;}
 }
 
 document.getElementById('tabs').onclick=function(ev){
   var b=ev.target.closest('button');if(!b){return;}
   switchTab(b.dataset.tab);
+};
+
+
+// ---- 服务器状态 ----
+function loadServer(){
+  api('GET','/api/server/status').then(function(d){
+    var rows=[
+      ['版本', d.version||''],
+      ['PID', d.pid],
+      ['Python', d.python],
+      ['平台', d.platform],
+      ['运行时长', d.uptime_s==null?'-':Math.floor(d.uptime_s/3600)+' 小时 '+Math.floor(d.uptime_s%3600/60)+' 分'],
+      ['线程数', d.threads],
+      ['负载(1m)', d.load1==null?'不可用（Windows 无 getloadavg）':d.load1],
+      ['进程内存', (d.memory&&d.memory.rss_mb!=null)?d.memory.rss_mb+' MB':'不可用（未装 psutil）'],
+      ['系统内存', (d.memory&&d.memory.system_used_pct!=null)?d.memory.system_used_pct+'%':'不可用'],
+      ['数据盘', (d.disk&&d.disk.total_gb!=null)?(d.disk.free_gb+' / '+d.disk.total_gb+' GB 可用（已用 '+d.disk.used_pct+'%）'):'读取失败'],
+      ['数据目录', d.data?(d.data.home+'（'+d.data.size_mb+' MB / '+d.data.files+' 文件）'):''],
+      ['号池 Key', d.pool_keys]
+    ];
+    document.getElementById('sv-rows').innerHTML=rows.map(function(r){
+      return '<tr><td>'+r[0]+'</td><td>'+r[1]+'</td></tr>';}).join('');
+  }).catch(function(e){
+    document.getElementById('sv-rows').innerHTML='<tr><td colspan="2">读取失败：'+e.message+'</td></tr>';
+  });
+}
+
+// ---- 迁移 ----
+function mgInit(){}
+
+document.getElementById('mg-export').onclick=function(){
+  var body={include_secrets:document.getElementById('mg-secrets').checked,
+            password:document.getElementById('mg-pass').value};
+  document.getElementById('mg-msg').textContent='导出中…';
+  api('POST','/api/export',body).then(function(bundle){
+    var blob=new Blob([JSON.stringify(bundle,null,1)],{type:'application/json'});
+    var a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='relayhub-migrate-'+Date.now()+'.json';
+    a.click();
+    setTimeout(function(){URL.revokeObjectURL(a.href);},2000);
+    document.getElementById('mg-msg').textContent='已导出（含密钥：'+(bundle.include_secrets?'是':'否')+'）';
+  }).catch(function(e){
+    document.getElementById('mg-msg').textContent='导出失败：'+e.message;});
+};
+
+function mgRead(){
+  return new Promise(function(resolve,reject){
+    var f=document.getElementById('mg-file').files[0];
+    if(!f){reject(new Error('先选一个迁移包'));return;}
+    var r=new FileReader();
+    r.onload=function(){try{resolve(JSON.parse(r.result));}catch(err){reject(new Error('不是合法 JSON'));}};
+    r.readAsText(f);
+  });
+}
+
+function mgRun(dry){
+  document.getElementById('mg-msg').textContent=dry?'预演中…':'导入中…';
+  mgRead().then(function(bundle){
+    return api('POST','/api/import',{bundle:bundle,dry_run:dry});
+  }).then(function(r){
+    document.getElementById('mg-msg').textContent=(r.dry_run?'预演':'已导入')+'：新增用户 '+r.users_added+'，新增令牌 '+r.tokens_added+(r.skipped_users.length?('，跳过用户 '+r.skipped_users.join('、')):'');
+  }).catch(function(e){
+    document.getElementById('mg-msg').textContent='失败：'+e.message;});
+}
+
+document.getElementById('mg-dry').onclick=function(){mgRun(true);};
+document.getElementById('mg-apply').onclick=function(){
+  if(!confirm('确认写入？同名用户与同哈希令牌会被跳过，现有账号不会被覆盖。')){return;}
+  mgRun(false);
 };
 
 // ---- new-api 账单（管理员功能） ----
