@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 
 from . import persist
@@ -578,6 +579,13 @@ class ReloadingRouter:
         # 反过来则会「拿着旧 router 配着新指纹」，从此永不刷新。
         self._fingerprint = config_fingerprint(self.pool_path)
         self._router = self._build()
+        # 每请求都重新解封号池算指纹太贵（实测单次 3ms 级）：改成时间窗缓存。
+        # 代价是热加载最多延迟 watch_interval 秒（默认 1s），换来请求路径零读盘。
+        # 默认 0：每个请求只多一次 stat（微秒级），语义上「改完立刻生效」；
+        # 想进一步省 stat 可设成正数（如 1.0），代价是热加载延迟到该窗口。
+        self._watch_interval = float(os.environ.get("RELAYHUB_WATCH_INTERVAL", "0"))
+        self._checked_at = 0.0
+        self._stamp: tuple[int, int] | None = None
 
     @property
     def pool(self) -> KeyPool:
@@ -592,6 +600,20 @@ class ReloadingRouter:
         )
 
     def _current(self) -> KeyPoolRouter:
+        # 先用 stat 探一下（微秒级）；只有 mtime/size 变了才去解封+解析（毫秒级）。
+        # 这样热加载仍然是「改完立刻生效」，但请求路径上不再有 3ms 级的重解析。
+        try:
+            info = self.pool_path.stat()
+            stamp = (info.st_mtime_ns, info.st_size)
+        except OSError:
+            stamp = None
+        if stamp is not None and stamp == self._stamp:
+            return self._router
+        if self._watch_interval > 0:
+            now = time.monotonic()
+            if now - self._checked_at < self._watch_interval:
+                return self._router
+            self._checked_at = now
         fingerprint = config_fingerprint(self.pool_path)
         # 读不到（正在被写）→ 保持现状。这是「空读」与「真变更」的分界点：
         # 前者绝不能触发 reload，否则并发下每次撕裂读都会重建路由表并裸读文件。
@@ -607,6 +629,7 @@ class ReloadingRouter:
                 return self._router
             self._router = new_router
             self._fingerprint = fingerprint
+            self._stamp = stamp
         return self._router
 
     # -- 与 KeyPoolRouter 同形 -------------------------------------------

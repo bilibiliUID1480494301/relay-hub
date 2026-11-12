@@ -63,3 +63,23 @@ python scripts/bench.py --threads 32 --requests 40
 --max-concurrency 64 --queue-size 512 --ip-rpm 0     # 压测/内网可信环境
 --max-concurrency 32 --queue-size 256 --ip-rpm 600   # 公网生产
 ```
+
+## 0.12.11：热路径三处（按审计优先级）
+
+| 项 | 改动 | 影响 |
+|---|---|---|
+| **防自环误伤**（正确性） | `LoopGuard` 分两条阈值：带 `Via`/`X-Relay-Hub-Hops` 的请求仍按 3 拦，**直连客户端放宽到 32**（`RELAYHUB_LOOP_DIRECT_LIMIT`，0=只靠 Via 判环） | 8 个客户端并发同 prompt 不再被判环回 429；真环路仍被 Via 标记拦住 |
+| 请求日志 | 常驻句柄 + 每 32 行 flush，chmod 只在打开时一次 | 去掉每请求 open/write/chmod 三条 syscall（审计实测关日志 +11%） |
+| 号池热加载 | 指纹按时间窗缓存（`RELAYHUB_WATCH_INTERVAL`，默认 1s），窗口内不读盘 | 去掉每请求解封+解析号池（审计实测关 watch +27%） |
+
+代价：热加载最多延迟 1s；请求日志崩溃最多丢 32 行明细（计费以号池/tokens 为准）。
+
+## 0.12.11：热路径三处（按审计优先级）
+
+| 项 | 改动 | 影响 |
+|---|---|---|
+| **防自环误伤**（正确性） | `LoopGuard` 分两条阈值：带 `Via`/`X-Relay-Hub-Hops` 的请求仍按 3 拦，**直连客户端放宽到 32**（`RELAYHUB_LOOP_DIRECT_LIMIT`，0=只靠 Via 判环） | 8 个客户端并发同 prompt 不再被判环回 429；真环路仍被 Via 标记拦住 |
+| 请求日志 | 常驻句柄 + 每 32 行 flush，chmod 只在打开时一次 | 去掉每请求 open/write/chmod 三条 syscall（审计实测关日志 +11%） |
+| 号池热加载 | 指纹按时间窗缓存（`RELAYHUB_WATCH_INTERVAL`，默认 1s），窗口内不读盘 | 去掉每请求解封+解析号池（审计实测关 watch +27%） |
+
+代价：热加载最多延迟 1s；请求日志崩溃最多丢 32 行明细（计费以号池/tokens 为准）。

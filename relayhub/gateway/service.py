@@ -2546,7 +2546,8 @@ class RelayHandler(BaseHTTPRequestHandler):
         fp = None
         if not is_test:
             fp = _request_fingerprint(model, body)
-            if not self.loop_guard.acquire(fp):
+            relayed = bool(inbound_via or inbound_hops)
+            if not self.loop_guard.acquire(fp, relayed=relayed):
                 self._error(
                     RELAY_LOOP_STATUS,
                     "检测到转发环路：同一请求内容在飞次数超限。请检查上游是否指回了本站。",
@@ -3108,20 +3109,35 @@ class LoopGuard:
 
     为什么用内容指纹而不是跳数头：中间隔一层 new-api 这类第三方网关，
     自定义头会被丢掉；但**请求内容原样透传**是所有中转站的共性。
-    正常请求在飞时同指纹最多 1-2 个（并发重试），环路上每跳都会 +1，
-    超过阈值判环。代价：三个客户端同时发一模一样的请求会误伤第三个——
-    阈值 3 下概率可忽略，换来的确定性终止是值的。
+
+    **两条阈值**（这是修掉误伤的关键）：
+      * `relayed=True`（请求带 Via / X-Relay-Hub-Hops，说明它穿过了中转）
+        → 紧阈值 3。真环路必然经过中转，每跳 +1，第 4 个就该拦。
+      * `relayed=False`（直连客户端，没有任何链路标识）
+        → 宽阈值 32。八个客户端同时发一模一样的 prompt 是正常负载，
+        旧版用同一个 3 会误伤第 4 个，客户端看到的是 429「检测到转发环路」。
+
+    直连阈值可用 RELAYHUB_LOOP_DIRECT_LIMIT 调整；设 0 表示只靠 Via/Hops 判环。
     """
 
-    def __init__(self, limit: int = 3) -> None:
-        self._limit = max(2, limit)
+    def __init__(self, limit: int = 3, direct_limit: int | None = None) -> None:
+        self._relay_limit = max(2, limit)
+        if direct_limit is None:
+            try:
+                direct_limit = int(os.environ.get("RELAYHUB_LOOP_DIRECT_LIMIT", "32"))
+            except ValueError:
+                direct_limit = 32
+        self._direct_limit = max(0, direct_limit)
         self._lock = threading.Lock()
         self._inflight: dict[str, int] = {}
 
-    def acquire(self, fingerprint: str) -> bool:
+    def acquire(self, fingerprint: str, relayed: bool = False) -> bool:
+        limit = self._relay_limit if relayed else self._direct_limit
+        if limit <= 0:
+            return True                     # 直连不设限：只靠 Via/Hops 判环
         with self._lock:
             count = self._inflight.get(fingerprint, 0)
-            if count >= self._limit:
+            if count >= limit:
                 return False
             self._inflight[fingerprint] = count + 1
             return True
@@ -3133,21 +3149,6 @@ class LoopGuard:
                 self._inflight.pop(fingerprint, None)
             else:
                 self._inflight[fingerprint] = count
-
-
-def _loop_fingerprint(model: str, body: dict[str, Any]) -> str:
-    """环指纹：模型 + 消息内容 + max_tokens。转发链上每一跳内容不变。"""
-    material = json.dumps(
-        {
-            "model": model,
-            "messages": body.get("messages"),
-            "max_tokens": body.get("max_tokens"),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        default=str,
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _request_fingerprint(model: str, body: dict[str, Any]) -> str:

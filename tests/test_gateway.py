@@ -590,14 +590,15 @@ def test_public_safety_gate() -> None:
 
 
 def test_loop_guard_counts_and_rejects() -> None:
+    """经过中转的请求（relayed）按紧阈值判环；直连的宽松阈值另有用例覆盖。"""
     from relayhub.gateway.service import LoopGuard
 
     guard = LoopGuard(limit=3)
     fp = "fp-x"
-    assert guard.acquire(fp) and guard.acquire(fp) and guard.acquire(fp)
-    assert not guard.acquire(fp)  # 第 4 个同指纹在飞 → 判环
+    assert guard.acquire(fp, relayed=True) and guard.acquire(fp, relayed=True) and guard.acquire(fp, relayed=True)
+    assert not guard.acquire(fp, relayed=True)  # 第 4 个同指纹在飞 → 判环
     guard.release(fp)
-    assert guard.acquire(fp)  # 释放后恢复
+    assert guard.acquire(fp, relayed=True)  # 释放后恢复
 
 
 def test_self_loop_terminates_quickly(tmp_path: Path) -> None:
