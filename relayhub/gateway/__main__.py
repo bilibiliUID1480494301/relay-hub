@@ -203,6 +203,14 @@ def _cmd_serve(argv: list[str]) -> int:
         help="请求明细保留天数（按日文件自动清理；0=永久保留，默认 30）",
     )
     parser.add_argument(
+        "--loop-guard",
+        choices=("on", "strict", "off"),
+        default=None,
+        dest="loop_guard",
+        help="防环模式：on=双阈值（默认）· strict=直连也按紧阈值 · off=关闭内容指纹"
+        "（Via/Hops 那一层仍生效）。也可用 RELAYHUB_LOOP_GUARD 环境变量",
+    )
+    parser.add_argument(
         "--ip-rpm",
         type=int,
         default=600,
@@ -343,6 +351,7 @@ def _cmd_serve(argv: list[str]) -> int:
         toip=toip_service,
         request_log=None if args.no_request_log else paths.requests_log_path(),
         ip_rpm=args.ip_rpm,
+        loop_guard=args.loop_guard,
         max_concurrency=args.max_concurrency,
         queue_size=args.queue_size,
         queue_wait=args.queue_wait,

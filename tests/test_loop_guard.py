@@ -31,3 +31,19 @@ def test_release_frees_slot():
     assert guard.acquire(_fp("rel"), relayed=True) is False
     guard.release(_fp("rel"))
     assert guard.acquire(_fp("rel"), relayed=True) is True
+
+
+def test_off_mode_never_blocks_fingerprint(monkeypatch):
+    """RELAYHUB_LOOP_GUARD=off：内容指纹守卫全关（Via/Hops 那一层仍在）。"""
+    monkeypatch.setenv("RELAYHUB_LOOP_GUARD", "off")
+    guard = LoopGuard()
+    assert guard.enabled is False
+    assert all(guard.acquire(_fp("any"), relayed=True) for _ in range(50))
+
+
+def test_strict_mode_uses_tight_limit_for_direct(monkeypatch):
+    """strict：直连也按 3 判环（老行为，给确实需要严格的人留着）。"""
+    monkeypatch.setenv("RELAYHUB_LOOP_GUARD", "strict")
+    guard = LoopGuard()
+    outcomes = [guard.acquire(_fp("s"), relayed=False) for _ in range(4)]
+    assert outcomes[:3] == [True, True, True] and outcomes[3] is False

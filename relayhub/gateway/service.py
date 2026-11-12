@@ -2544,7 +2544,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         # 中间哪怕隔着 new-api 这类不改内容的第三方网关也能命中）。
         # test 令牌走本地合成应答，不触上游，无环风险，不计数。
         fp = None
-        if not is_test:
+        if not is_test and self.loop_guard.enabled:
             fp = _request_fingerprint(model, body)
             relayed = bool(inbound_via or inbound_hops)
             if not self.loop_guard.acquire(fp, relayed=relayed):
@@ -3120,7 +3120,10 @@ class LoopGuard:
     直连阈值可用 RELAYHUB_LOOP_DIRECT_LIMIT 调整；设 0 表示只靠 Via/Hops 判环。
     """
 
-    def __init__(self, limit: int = 3, direct_limit: int | None = None) -> None:
+    def __init__(self, limit: int = 3, direct_limit: int | None = None, mode: str | None = None) -> None:
+        # mode: on（默认，双阈值）/ strict（全部按紧阈值）/ off（**只关内容指纹**）
+        self.mode = (mode or os.environ.get("RELAYHUB_LOOP_GUARD", "on")).strip().lower()
+        self.enabled = self.mode != "off"
         self._relay_limit = max(2, limit)
         if direct_limit is None:
             try:
@@ -3132,6 +3135,10 @@ class LoopGuard:
         self._inflight: dict[str, int] = {}
 
     def acquire(self, fingerprint: str, relayed: bool = False) -> bool:
+        if not self.enabled:
+            return True
+        if self.mode == "strict":
+            relayed = True
         limit = self._relay_limit if relayed else self._direct_limit
         if limit <= 0:
             return True                     # 直连不设限：只靠 Via/Hops 判环
@@ -3255,7 +3262,8 @@ class RelayServer(ThreadingHTTPServer):
         users: UserStore | None = None,
         redeem: RedeemStore | None = None,
         loop_limit: int = 3,
-        ip_rpm: int = 60,
+        loop_guard: str | None = None,
+        ip_rpm: int = 600,
         max_concurrency: int = 16,
         queue_size: int = 16,
         queue_wait: float = 30.0,
@@ -3304,7 +3312,7 @@ class RelayServer(ThreadingHTTPServer):
             else None
         )
         # 转发环路检测：内容指纹 + 在飞计数（阈值 3）
-        self.loop_guard = LoopGuard(loop_limit)
+        self.loop_guard = LoopGuard(loop_limit, mode=loop_guard)
         # 链路标识：本站实例标记（进 Via 头，环路检测的最强信号）
         self.instance_id = f"relayhub-{uuid.uuid4().hex[:8]}"
         # E2E 信封：身份懒加载（首次用到才生成/读盘），重放去重内存态
