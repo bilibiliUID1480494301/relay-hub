@@ -3040,9 +3040,9 @@ class RelayHandler(BaseHTTPRequestHandler):
 
             # 指纹观测：一次内存写 + 置脏标记，实际落盘交给 persist 线程
             try:
-                changed = self.drift_store.observe(
+                changed = (self.drift_store.observe(
                     str(outcome.label or "unknown"), str(outcome.model or model), outcome.message
-                )
+                ) if self.drift_store else [])
                 if changed:
                     audit_module.record(
                         "drift.changed", path=self.server.audit_path,
@@ -3332,7 +3332,9 @@ class RelayServer(ThreadingHTTPServer):
         # 转发环路检测：内容指纹 + 在飞计数（阈值 3）
         self.loop_guard = LoopGuard(loop_limit, mode=loop_guard)
         # 上游响应特征观测：只在响应**已经拿到之后**做，不在请求路径阻塞
-        self.drift_store = drift_module.Store(paths.drift_path())
+        # 观测开关：RELAYHUB_DRIFT=off 可关掉（压测 A/B 用，生产建议开着）
+        self.drift_enabled = os.environ.get("RELAYHUB_DRIFT", "on").strip().lower() != "off"
+        self.drift_store = drift_module.Store(paths.drift_path()) if self.drift_enabled else None
         # 链路标识：本站实例标记（进 Via 头，环路检测的最强信号）
         self.instance_id = f"relayhub-{uuid.uuid4().hex[:8]}"
         # E2E 信封：身份懒加载（首次用到才生成/读盘），重放去重内存态

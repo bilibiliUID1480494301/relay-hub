@@ -79,6 +79,7 @@ def _all_files(path: Path) -> list[Path]:
 # 常驻句柄：每请求 open+write+chmod 是三条 syscall，实测关掉日志能快 11%。
 # 改成「一个文件一个句柄 + 每 32 行 flush」；崩溃最多丢 32 行明细（计费以
 # tokens.json/号池为准，明细丢失只影响排障，不影响扣费）。
+_ENSURED_DIRS: set[str] = set()
 _HANDLES: dict[str, list] = {}
 _HANDLE_LOCK = threading.Lock()
 _HANDLE_MAX = 8          # 跨天会新开文件，保留最近几个即可
@@ -106,6 +107,19 @@ def _write_line(daily: Path, line: str) -> None:
         if slot[1] >= FLUSH_EVERY:
             slot[0].flush()
             slot[1] = 0
+
+
+def _ensure_dir(parent: Path) -> None:
+    """目录只确认一次。
+
+    这条曾是每请求一次 `mkdir(parents=True, exist_ok=True)`：Windows 上实测
+    **242 µs/次**（多次 stat + 可能触发杀软扫描），比整条 JSON 序列化贵 160 倍。
+    """
+    key = str(parent)
+    if key in _ENSURED_DIRS:
+        return
+    parent.mkdir(parents=True, exist_ok=True)
+    _ENSURED_DIRS.add(key)
 
 
 def flush_all() -> None:
@@ -203,7 +217,7 @@ def record(
         entry["reason"] = str(reason)[:120]
     try:
         daily = _daily_path(Path(path), ts)
-        daily.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_dir(daily.parent)
         _write_line(daily, json.dumps(entry, ensure_ascii=False) + chr(10))
     except OSError as exc:
         print(f"警告：请求明细写入失败（{exc}）", file=sys.stderr)
