@@ -41,6 +41,7 @@ from . import users as user_module
 from . import tokens as token_module
 from . import persist as persist_module
 from . import drift as drift_module
+from . import oversell as oversell_module
 from . import probe as probe_module
 from . import security as security_module
 from . import serverstat as serverstat_module
@@ -566,6 +567,12 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._error(401, "缺少或错误的 token")
                 return
             self._send_json(200, self._state())
+            return
+        if path == "/api/oversell":
+            if not self._authorized():
+                self._error(401, "缺少或错误的 token")
+                return
+            self._send_json(200, self._oversell())
             return
         if path == "/api/drift":
             if not self._authorized():
@@ -1704,6 +1711,29 @@ class AdminHandler(BaseHTTPRequestHandler):
                 users=str(result["users_added"]), tokens=str(result["tokens_added"]),
             )
         self._send_json(200, result)
+
+    def _oversell(self) -> dict[str, Any]:
+        """超售/余额预警：纯计算，不联网、不起线程。"""
+        pool = KeyPool.load(self.pool_path)
+        credits = [k.credits for k in pool.keys]
+        users_pool = user_module.UserPool.load(self.server.users_path)  # type: ignore[attr-defined]
+        quotas = [u.quota for u in users_pool.users]
+        points = []
+        try:
+            for entry in reqlog_module.tail(self.server.requests_path, limit=5000):  # type: ignore[attr-defined]
+                cost = entry.get("cost") or entry.get("upstream_cost") or 0
+                ts = entry.get("ts")
+                if ts and cost and int(cost) > 0:
+                    points.append((float(ts), float(cost)))
+        except Exception:  # noqa: BLE001 - 日志读不到就按「无消耗数据」处理
+            points = []
+        warn_days = 3.0
+        result = oversell_module.summarize(
+            key_credits=credits, user_quotas=quotas, points=points, warn_days=warn_days
+        )
+        result["warn_days"] = warn_days
+        result["note"] = "余额未知时不做预测；「oversold」= 已售出额度 − 上游余额"
+        return result
 
     def _server_status(self) -> dict[str, Any]:
         data = serverstat_module.status(paths.relayhub_home(), self.server.started_at)  # type: ignore[attr-defined]

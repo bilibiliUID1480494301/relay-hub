@@ -19,6 +19,7 @@ from typing import Callable
 DEFAULT_INTERVAL = 0.15
 
 _writers: dict[str, "DeferredWriter"] = {}
+_reg_lock_inner = threading.Lock()
 _registry_lock = threading.Lock()
 
 
@@ -31,12 +32,25 @@ class DeferredWriter:
         self._stop = threading.Event()
         self.writes = 0
         self.failures = 0
-        self._thread = threading.Thread(target=self._loop, name="rh-persist", daemon=True)
-        self._thread.start()
+        self._thread: threading.Thread | None = None
+
+    def _ensure_thread(self) -> None:
+        """**懒启动**：没有写入就不起线程。
+
+        早期版本在构造时就起线程，测试里每个临时目录一个 writer →
+        单进程几百个轮询线程，全量从 3 分钟涨到 37 分钟。
+        """
+        if self._thread is not None:
+            return
+        with _reg_lock_inner:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._loop, name="rh-persist", daemon=True)
+                self._thread.start()
 
     def mark(self) -> None:
         """请求路径只做这一件事：置脏标记，不做任何 IO。"""
         self._dirty.set()
+        self._ensure_thread()
 
     def flush(self) -> None:
         """立即写一次（退出、管理面写操作前调用）。"""
