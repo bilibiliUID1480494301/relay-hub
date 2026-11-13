@@ -366,3 +366,15 @@ modalities / ratio / completion_ratio` 规范化后 sha256 前 16 位），只�
 
 **关掉省多少**：每次请求少算一次 SHA-256 指纹（4KB 正文实测 **21.4 µs**，
 1000 rps 约等于单核 2%），外加一次字典计数与一把锁。
+
+
+---
+
+## Language note / 语言说明
+
+This document is **Chinese-first**. The endpoint table above is language-neutral and can be read
+directly; the admin console itself has an EN/中文 toggle in the top-right (choice is remembered in
+`localStorage`). A full English translation of `docs/` is still TODO.
+
+本文档**以中文为主**。上面的端点表与语言无关，可直接阅读；管理面右上角有 EN/中文 切换
+（选择记在 `localStorage`）。`docs/` 的完整英文版尚未翻译。

@@ -3920,9 +3920,27 @@ switchTab('clients');
     "本站在线查询（billing 接口）":"This station's billing API",
     "开放 billing 接口":"Enable billing API","项":"Item",
     "总额度":"Total Credit","已用":"Used","剩余":"Remaining",
+    "插件":"Plugins","动态口令":"TOTP","外观":"Appearance",
+    "消息":"Messages","调用":"Calls","失败":"Failed","成功率":"Success rate",
+    "服务器":"Server","迁移":"Migrate","服务器状态":"Server Status","站点迁移":"Site Migration",
+    "进程与机器概况。内存细节需要服务端装 psutil，没有则显示「不可用」而不是 0。":
+      "Process and machine overview. Memory details need psutil on the server; without it we show \"unavailable\" rather than 0.",
+    "导出迁移包":"Export bundle","口令（含密钥时必填，≥8 位）":"Passphrase (required with secrets, ≥8 chars)",
+    "包含上游 Key":"Include upstream keys","预演导入":"Dry-run import","确认导入":"Confirm import",
+    "PID":"PID","平台":"Platform","运行时长":"Uptime","线程数":"Threads","负载(1m)":"Load (1m)",
+    "进程内存":"Process memory","系统内存":"System memory","数据盘":"Data disk",
+    "数据目录":"Data directory","号池 Key":"Pool keys","项":"Item",
+    "不可用（Windows 无 getloadavg）":"unavailable (no getloadavg on Windows)",
+    "不可用（未装 psutil）":"unavailable (psutil not installed)",
+    "导出中…":"Exporting…","预演中…":"Dry-running…","导入中…":"Importing…",
+    "先选一个迁移包":"Pick a bundle first","不是合法 JSON":"Not valid JSON",
+    "确认写入？同名用户与同哈希令牌会被跳过，现有账号不会被覆盖。":
+      "Write now? Same-name users and same-hash tokens are skipped; existing accounts are never overwritten.",
+    "导出用户、令牌（仅哈希）与站点设置。默认不含上游 Key；要带密钥必须填口令，导出的是加密块。导入默认只预演，确认后再写入。":
+      "Exports users, token hashes and site settings. Upstream keys are excluded by default; including them requires a passphrase and yields an encrypted blob. Import dry-runs first."
     "显示在用户面板、落地页与管理面的标题上；留空恢复默认 relay-hub。":"Shown as the title on the user panel, landing page and admin console; leave blank to restore the default relay-hub."
   };
-  var en = false, btn;
+  var en = localStorage.getItem('rh_lang') === 'en', btn;
   function walk(node){
     if (node.nodeType === 3) {
       var t = node.textContent.trim();
@@ -3939,9 +3957,15 @@ switchTab('clients');
   }
   btn = document.createElement('button');
   btn.className = 'ghost'; btn.textContent = 'EN'; btn.style.minWidth = 'auto';
-  btn.onclick = function(){ en = !en; btn.textContent = en ? '中文' : 'EN'; walk(document.body); };
+  btn.onclick = function(){
+    en = !en;
+    localStorage.setItem('rh_lang', en ? 'en' : 'zh');
+    btn.textContent = en ? '中文' : 'EN';
+    walk(document.body);
+  };
   var h = document.querySelector('header');
   if (h) h.appendChild(btn);
+  if (en) { btn.textContent = '中文'; walk(document.body); }   // 刷新后保持上次选择
 })();
 // 退出登录：后端早就有 /logout，页面一直没给入口——会话只能等过期才能清
 (function(){

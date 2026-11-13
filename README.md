@@ -724,6 +724,24 @@ Or from Python: `hubrelay.doctor(port=8799)` → list of `{name, ok, detail, fix
 - 遇到疑似密钥泄露请立即吊销（`token rm` / 更换上游 Key）。
 
 
+## English quickstart
+
+```
+pip install hubrelay
+relayhub.gateway users init --username admin        # create the owner account
+relayhub.gateway pool add --label main --base-url https://api.example.com/v1     --api-key sk-... --protocol openai-chat --model gpt-4o
+relayhub.gateway serve --pool %LOCALAPPDATA%/relay-hub/pool.json --api-key my-master-key
+```
+
+- Admin console: `relayhub.gateway admin --token <token>` → http://127.0.0.1:8801
+- Web panel: http://127.0.0.1:8799 (set `--port`)
+- Docs are **Chinese-first**; [`docs/TOIP.md`](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/TOIP.md)
+  is bilingual, and the admin console has a built-in EN/中文 toggle.
+- Full English translation of `docs/` is not done yet — tracked as TODO.
+
+> Common trap: `serve` without `--pool` uses a **built-in demo pool** (deepseek/glm models only).
+> Point it at your pool file explicitly.
+
 ## 配套：桌面控制台（relay-hub Console）
 
 不想记命令的话，用配套的 Windows 桌面端管理多个站点：站点库、状态灯、渠道/令牌/用量/日志、
