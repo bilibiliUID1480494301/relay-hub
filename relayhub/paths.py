@@ -137,6 +137,11 @@ def site_path() -> Path:
     return relayhub_home() / "site.json"
 
 
+def recovery_path() -> Path:
+    """TOTP 恢复码（只存哈希）。"""
+    return relayhub_home() / "recovery.json"
+
+
 def drift_path() -> Path:
     """上游响应特征（指纹）变化记录。"""
     return relayhub_home() / "drift.json"

@@ -43,6 +43,7 @@ from . import persist as persist_module
 from . import drift as drift_module
 from . import oversell as oversell_module
 from . import probe as probe_module
+from . import totpauth as totpauth_module
 from . import security as security_module
 from . import serverstat as serverstat_module
 from . import updater as updater_module
@@ -685,7 +686,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             ["api", "keys"], ["api", "tokens"],
             ["api", "users"], ["api", "codes"], ["api", "policy"],
             ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"], ["api", "fingerprint"], ["api", "announcement"], ["api", "theme"], ["api", "update"],
-            ["api", "export"], ["api", "import"], ["api", "codes"],
+            ["api", "export"], ["api", "import"], ["api", "codes"], ["api", "totp"],
             ["api", "events"],
         ) or parts in (
             ["api", "settings"], ["api", "webui"],
@@ -703,6 +704,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                 )
                 self._error(403, f"权限不足：需要 {needed}")
                 return
+
+        if parts == ["api", "totp", "recovery"] and method in ("GET", "POST"):
+            self._totp_recovery()
+            return
 
         if parts == ["api", "export"] and method == "POST":
             if self.role != "owner":
@@ -2276,7 +2281,33 @@ class AdminServer(ThreadingHTTPServer):
         base, _, code = supplied.partition(":")
         if not code or not hmac.compare_digest(base, self.token or ""):
             return False
-        return self._totp_verify(code)
+        if self._totp_verify(code):
+            return True
+        # 手机丢了/时钟坏了：恢复码一次性核销（只存哈希，用完即废）
+        return self._recovery().consume(code)
+
+    def _recovery(self) -> Any:
+        return totpauth_module.Store(paths.recovery_path())
+
+    def _totp_recovery(self) -> None:
+        """恢复码：owner 才能生成；GET 只报剩余数量。"""
+        if self.role != "owner":
+            self._error(403, "只有站长可以管理恢复码")
+            return
+        store = self._recovery()
+        if self.command == "GET":
+            self._send_json(200, {"remaining": store.remaining()})
+            return
+        codes = store.regenerate()
+        audit_module.record(
+            "totp.recovery_generated", path=self.server.audit_path,  # type: ignore[attr-defined]
+            count=str(len(codes)),
+        )
+        self._send_json(200, {
+            "codes": codes,
+            "remaining": store.remaining(),
+            "note": "只显示这一次；旧码已全部作废。每个码只能用一次",
+        })
 
     def _totp_verify(self, code: str, *, window: int = 1) -> bool:
         import base64 as _b64
