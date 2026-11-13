@@ -137,6 +137,11 @@ def site_path() -> Path:
     return relayhub_home() / "site.json"
 
 
+def probes_path() -> Path:
+    """探测题结果（人工触发，只读展示）。"""
+    return relayhub_home() / "probes.json"
+
+
 def features_path() -> Path:
     """站点功能开关（如 billing_enabled），与 site.json 同目录。"""
     return relayhub_home() / "features.json"

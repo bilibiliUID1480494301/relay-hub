@@ -40,6 +40,7 @@ from . import migrate as migrate_module
 from . import users as user_module
 from . import tokens as token_module
 from . import persist as persist_module
+from . import probe as probe_module
 from . import security as security_module
 from . import serverstat as serverstat_module
 from . import updater as updater_module
@@ -564,6 +565,17 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._error(401, "缺少或错误的 token")
                 return
             self._send_json(200, self._state())
+            return
+        if path == "/api/probes":
+            if not self._authorized():
+                self._error(401, "缺少或错误的 token")
+                return
+            store = probe_module.Store(paths.probes_path())
+            self._send_json(200, {
+                "probes": probe_module.prompts(),
+                "summary": store.summary(),
+                "disclaimer": "启发式判断，仅供参考，不构成质量承诺",
+            })
             return
         if path == "/api/server/status":
             if not self._authorized():

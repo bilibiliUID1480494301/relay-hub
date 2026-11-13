@@ -723,6 +723,15 @@ Or from Python: `hubrelay.doctor(port=8799)` → list of `{name, ok, detail, fix
   `toip station --force`——已发出的会话令牌不受影响。
 - 遇到疑似密钥泄露请立即吊销（`token rm` / 更换上游 Key）。
 
+
+## 配套：桌面控制台（relay-hub Console）
+
+不想记命令的话，用配套的 Windows 桌面端管理多个站点：站点库、状态灯、渠道/令牌/用量/日志、
+一键升级（本地验签）、远程部署、本机自检。
+
+- 仓库：https://github.com/bilibiliUID1480494301/rh-console
+- 下载（免安装 exe）：https://github.com/bilibiliUID1480494301/rh-console/releases/latest
+
 ## 文档目录 docs/
 
 | 文档 | 内容 |

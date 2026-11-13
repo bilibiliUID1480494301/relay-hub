@@ -832,6 +832,50 @@ def _cmd_token_toggle(args: argparse.Namespace, enabled: bool) -> int:
     return 0
 
 
+def _cmd_probe(argv: list[str]) -> int:
+    """跑三题探测（画图 / 算术 / 随机）。**只在手动执行时发请求**，不进转发路径。"""
+    import argparse
+
+    from . import probe as probe_module
+
+    parser = argparse.ArgumentParser(
+        prog="relayhub.gateway probe",
+        description="用三道社区常见题探测某个上游渠道的表现（结果仅供参考）",
+    )
+    parser.add_argument("--base-url", required=True, help="例如 https://api.deepseek.com/v1")
+    parser.add_argument("--api-key", required=True)
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--channel", default="", help="渠道名（结果按名归档，默认用 id 前 8 位）")
+    parser.add_argument("--only", default="", help="只跑某一题：pelican_bike / candy / random")
+    parser.add_argument("--max-tokens", type=int, default=700)
+    args = parser.parse_args(argv)
+
+    channel = args.channel.strip() or f"channel-{args.api_key[-8:]}"
+    store = probe_module.Store(paths.probes_path())
+    chosen = [p for p in probe_module.PROBES if not args.only or p["id"] == args.only]
+    if not chosen:
+        print(f"没有题号为 {args.only} 的探测题", file=sys.stderr)
+        return 2
+
+    for probe in chosen:
+        result = probe_module.run_one(
+            probe,
+            base_url=args.base_url,
+            api_key=args.api_key,
+            model=args.model,
+            max_tokens=args.max_tokens,
+        )
+        store.record(channel, probe["id"], result)
+        mark = {"ok": "✓", "suspect": "?", "error": "✗"}.get(str(result.get("verdict")), "?")
+        line = f"{mark} {probe['title']}  score={result.get('score')}  {result.get('elapsed_ms')}ms"
+        if result.get("reasons"):
+            line += "  " + "；".join(result["reasons"])
+        print(line)
+    store.save()
+    print(f"结果已写入 {paths.probes_path()}（启发式判断，仅供参考）")
+    return 0
+
+
 def _cmd_token(argv: list[str]) -> int:
     # 与 `pool` 同一个 argparse 陷阱：`--tokens` 只挂各子命令，不挂组。
     common = argparse.ArgumentParser(add_help=False)
@@ -1750,6 +1794,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_requests_main(argv[1:])
     if argv and argv[0] == "usage":
         return _cmd_usage_main(argv[1:])
+    if argv and argv[0] == "probe":
+        return _cmd_probe(argv[1:])
     if argv and argv[0] == "token":
         return _cmd_token(argv[1:])
     if argv and argv[0] == "clients":
