@@ -459,6 +459,39 @@ class RedeemStore:
             self._save(codes)
             return fresh
 
+    def destroy(self, codes: list[str], *, include_used: bool = False,
+                all_unused: bool = False) -> dict[str, object]:
+        """批量销毁。**已核销的码默认不动**——删掉它会抹掉"谁用掉的"这条证据。
+
+        all_unused=True 时销毁所有未使用的码（等价于"清空库存"）。
+        """
+        targets = {c.strip() for c in codes if c and c.strip()}
+        if not all_unused and not targets:
+            raise UserError("没有指定要销毁的兑换码")
+        with self._lock:
+            existing = self._load()
+            kept, removed, refused, seen = [], [], [], set()
+            for item in existing:
+                hit = all_unused and not item.used_by or item.code in targets
+                if hit:
+                    seen.add(item.code)
+                    if item.used_by and not include_used:
+                        refused.append(item.code)
+                        kept.append(item)
+                        continue
+                    removed.append(item.code)
+                    continue
+                kept.append(item)
+            missing = sorted(targets - seen) if targets else []
+            self._save(kept)
+            return {
+                "removed": len(removed),
+                "removed_codes": removed,
+                "refused_used": refused,
+                "missing": missing,
+                "remaining": len(kept),
+            }
+
     def list(self) -> list[RedeemCode]:
         with self._lock:
             return self._load()

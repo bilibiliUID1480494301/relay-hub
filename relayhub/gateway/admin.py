@@ -667,7 +667,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             ["api", "keys"], ["api", "tokens"],
             ["api", "users"], ["api", "codes"], ["api", "policy"],
             ["api", "newapi"], ["api", "features"], ["api", "probe"], ["api", "pricing"], ["api", "fingerprint"], ["api", "announcement"], ["api", "theme"], ["api", "update"],
-            ["api", "export"], ["api", "import"],
+            ["api", "export"], ["api", "import"], ["api", "codes"],
             ["api", "events"],
         ) or parts in (
             ["api", "settings"], ["api", "webui"],
@@ -1227,6 +1227,28 @@ class AdminHandler(BaseHTTPRequestHandler):
             pool.save(users_path)
 
     def _handle_codes(self, method: str, parts: list[str]) -> None:
+        if method == "POST" and len(parts) == 3 and parts[2] == "destroy":
+            body = self._read_json() or {}
+            codes = body.get("codes") or []
+            if not isinstance(codes, list):
+                self._error(400, "codes 必须是数组")
+                return
+            try:
+                result = self.server.redeem_store.destroy(  # type: ignore[attr-defined]
+                    [str(c) for c in codes],
+                    include_used=bool(body.get("include_used")),
+                    all_unused=bool(body.get("all_unused")),
+                )
+            except user_module.UserError as exc:
+                self._error(400, str(exc))
+                return
+            audit_module.record(
+                "codes.destroy", path=self.server.audit_path,  # type: ignore[attr-defined]
+                removed=str(result["removed"]), refused=str(len(result["refused_used"])),
+            )
+            self._send_json(200, result)
+            return
+
         if method == "POST" and len(parts) == 2:
             body = self._read_json() or {}
             try:
