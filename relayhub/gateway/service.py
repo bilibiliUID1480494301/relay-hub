@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from .. import paths
+from . import drift as drift_module
 from .. import __version__ as relayhub_version
 from . import audit as audit_module
 from . import a2a as a2a_module
@@ -3036,6 +3037,23 @@ class RelayHandler(BaseHTTPRequestHandler):
         self._record(identity, True, tokens_in, tokens_out)
         if cache_key:
             self.response_cache.put(cache_key, outcome.message)
+
+            # 指纹观测：一次内存写 + 置脏标记，实际落盘交给 persist 线程
+            try:
+                changed = self.drift_store.observe(
+                    str(outcome.label or "unknown"), str(outcome.model or model), outcome.message
+                )
+                if changed:
+                    audit_module.record(
+                        "drift.changed", path=self.server.audit_path,
+                        channel=str(outcome.label or ""), model=str(outcome.model or model),
+                        changed=",".join(changed),
+                    )
+                    persist.writer_for(
+                        self.drift_store.path, lambda path: self.drift_store.save()
+                    ).mark()
+            except Exception:  # noqa: BLE001 - 观测失败绝不影响这次响应
+                pass
         self._log_request(
             started=started, dialect=dialect, model=model, identity=identity,
             ok=True, stream=False, status=200,
@@ -3313,6 +3331,8 @@ class RelayServer(ThreadingHTTPServer):
         )
         # 转发环路检测：内容指纹 + 在飞计数（阈值 3）
         self.loop_guard = LoopGuard(loop_limit, mode=loop_guard)
+        # 上游响应特征观测：只在响应**已经拿到之后**做，不在请求路径阻塞
+        self.drift_store = drift_module.Store(paths.drift_path())
         # 链路标识：本站实例标记（进 Via 头，环路检测的最强信号）
         self.instance_id = f"relayhub-{uuid.uuid4().hex[:8]}"
         # E2E 信封：身份懒加载（首次用到才生成/读盘），重放去重内存态

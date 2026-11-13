@@ -40,6 +40,7 @@ from . import migrate as migrate_module
 from . import users as user_module
 from . import tokens as token_module
 from . import persist as persist_module
+from . import drift as drift_module
 from . import probe as probe_module
 from . import security as security_module
 from . import serverstat as serverstat_module
@@ -565,6 +566,16 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._error(401, "缺少或错误的 token")
                 return
             self._send_json(200, self._state())
+            return
+        if path == "/api/drift":
+            if not self._authorized():
+                self._error(401, "缺少或错误的 token")
+                return
+            store = drift_module.Store(paths.drift_path())
+            self._send_json(200, {
+                "summary": store.summary(),
+                "note": "响应特征变化只代表上游实现/口径变了，不代表模型变差",
+            })
             return
         if path == "/api/probes":
             if not self._authorized():

@@ -137,6 +137,11 @@ def site_path() -> Path:
     return relayhub_home() / "site.json"
 
 
+def drift_path() -> Path:
+    """上游响应特征（指纹）变化记录。"""
+    return relayhub_home() / "drift.json"
+
+
 def probes_path() -> Path:
     """探测题结果（人工触发，只读展示）。"""
     return relayhub_home() / "probes.json"
