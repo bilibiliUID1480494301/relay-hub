@@ -29,12 +29,14 @@ def test_no_credentials_leak_into_status(tmp_path: Path):
         assert secret not in blob
 
 
-def test_admin_panel_has_server_and_migrate_tabs():
-    """面板新页签必须有入口、有容器、有加载函数——三者缺一就是半成品。"""
+def test_admin_panel_has_server_tab():
+    """面板页签必须有入口、有容器、有加载函数——三者缺一就是半成品。
+
+    迁移不在网页端（属于桌面控制台），见 test_admin_i18n。
+    """
     from relayhub.gateway import admin as admin_mod
 
     html = admin_mod.PAGE_HTML
-    for needle in ('data-tab="server"', 'data-tab="migrate"',
-                   'id="pane-server"', 'id="pane-migrate"',
-                   "function loadServer", "function mgRun"):
+    for needle in ('data-tab="server"', 'id="pane-server"', "function loadServer"):
         assert needle in html, needle
+    assert 'data-tab="migrate"' not in html

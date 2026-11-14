@@ -1,0 +1,56 @@
+﻿# 可信发布（Trusted Publishing）：用 GitHub OIDC 换短期凭据，仓库里不放任何 PyPI token。
+#
+# 一次性配置（在 PyPI 侧做，只能人工点）：
+#   pypi.org → 你的项目 hubrelay → Publishing → Add a new publisher
+#     Owner:        bilibiliUID1480494301
+#     Repository:   relay-hub
+#     Workflow:     release.yml
+#     Environment:  pypi
+# 配好之后，本工作流不再需要 TWINE_PASSWORD；token 泄露/过期都与此无关。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已存在的 tag（如 v0.12.21）"
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Sanity check the artifacts
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write        # 这一行是全部：OIDC 令牌，短期、不可复用
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # 已经发过的版本不要中断流水线（重跑 tag 时常见）
+          skip-existing: true

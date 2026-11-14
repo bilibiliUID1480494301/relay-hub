@@ -44,3 +44,20 @@ def test_language_choice_persists_across_reload():
     html = admin_mod.PAGE_HTML
     assert "localStorage.getItem('rh_lang')" in html
     assert "localStorage.setItem('rh_lang'" in html
+
+
+def test_sidebar_nav_and_status_dots_present():
+    """布局：左侧竖排导航 + 每项状态灯 + 窄屏折叠。"""
+    html = admin_mod.PAGE_HTML
+    assert "grid-template-columns:200px minmax(0,1fr)" in html
+    assert "#tabs button.active{background:var(--accent-soft)" in html
+    assert "function navDots" in html and "setInterval(navDots" in html
+    assert "@media(max-width:820px)" in html
+
+
+def test_migrate_tab_lives_in_desktop_console_not_web():
+    """迁移是运维动作，属于 Rust 管理端；网页端只保留只读能力。"""
+    html = admin_mod.PAGE_HTML
+    assert 'data-tab="migrate"' not in html
+    assert 'id="pane-migrate"' not in html
+    assert "mg-export" not in html          # 不能留下悬空的 DOM 引用

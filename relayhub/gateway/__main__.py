@@ -858,21 +858,24 @@ def _cmd_probe(argv: list[str]) -> int:
         return 2
 
     for probe in chosen:
-        result = probe_module.run_one(
+        answers = probe_module.run_one(
             probe,
             base_url=args.base_url,
             api_key=args.api_key,
             model=args.model,
             max_tokens=args.max_tokens,
         )
-        store.record(channel, probe["id"], result)
-        mark = {"ok": "✓", "suspect": "?", "error": "✗"}.get(str(result.get("verdict")), "?")
-        line = f"{mark} {probe['title']}  score={result.get('score')}  {result.get('elapsed_ms')}ms"
-        if result.get("reasons"):
-            line += "  " + "；".join(result["reasons"])
-        print(line)
+        store.record(channel, probe["id"], answers)
+        # 不做判定：原样打印，人自己看
+        print(f"— {probe['title']}")
+        for item in answers:
+            if item.get("error"):
+                print(f"    ✗ {item['error']}")
+            else:
+                body = " ".join((item.get("text") or "").split())
+                print(f"    · {item.get('elapsed_ms')}ms  {body[:200]}")
     store.save()
-    print(f"结果已写入 {paths.probes_path()}（启发式判断，仅供参考）")
+    print(f"结果已写入 {paths.probes_path()}（原始回答，未做判定）")
     return 0
 
 

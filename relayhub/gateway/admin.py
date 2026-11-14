@@ -593,7 +593,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "probes": probe_module.prompts(),
                 "summary": store.summary(),
-                "disclaimer": "启发式判断，仅供参考，不构成质量承诺",
+                "disclaimer": "原始回答原样展示，不做自动判定",
             })
             return
         if path == "/api/server/status":
@@ -2410,7 +2410,26 @@ PAGE_HTML = r"""<!DOCTYPE html>
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);
 font:13px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif}
-.wrap{max-width:1100px;margin:0 auto;padding:24px 20px 60px}
+.wrap{max-width:1240px;margin:0 auto;padding:24px 20px 60px}
+.wrap{display:grid;grid-template-columns:200px minmax(0,1fr);column-gap:20px;
+align-items:start}
+header{grid-column:1/-1}
+#tabs{grid-column:1;grid-row:2;display:flex;flex-direction:column;gap:2px;
+position:sticky;top:16px;height:max-content;padding:6px;border:1px solid var(--line);
+border-radius:12px;background:var(--panel)}
+#tabs button{width:100%;text-align:left;background:transparent;border:1px solid transparent;
+color:var(--fg);border-radius:8px;padding:8px 10px;display:flex;align-items:center;gap:8px}
+#tabs button:hover{background:var(--accent-soft);opacity:1}
+#tabs button.active{background:var(--accent-soft);color:var(--accent);font-weight:500}
+.pane{grid-column:2;grid-row:2;min-width:0}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:0 0 auto}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
+@media(max-width:820px){
+  .wrap{grid-template-columns:minmax(0,1fr)}
+  #tabs{grid-column:1;grid-row:auto;flex-direction:row;flex-wrap:wrap;position:static}
+  .pane{grid-column:1;grid-row:auto}
+}
+
 header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:18px}
 h1{font-size:15px;font-weight:500;margin:0}
 h2{font-size:14px;font-weight:500;margin:0 0 12px}
@@ -2499,7 +2518,6 @@ display:none;border:1px solid var(--line);background:var(--panel)}
   <button data-tab="toip">动态口令</button>
   <button data-tab="theme">外观</button>
   <button data-tab="server">服务器</button>
-  <button data-tab="migrate">迁移</button>
   <button data-tab="audit">审计</button>
 </nav>
 
@@ -2510,24 +2528,6 @@ display:none;border:1px solid var(--line);background:var(--panel)}
   <div style="overflow-x:auto"><table>
     <thead><tr><th>项</th><th>值</th></tr></thead><tbody id="sv-rows"></tbody>
   </table></div>
-</section>
-</div>
-
-<div class="pane" id="pane-migrate" style="display:none">
-<section class="panel">
-  <h2>站点迁移</h2>
-  <p class="hint">导出用户、令牌（仅哈希）与站点设置。<b>默认不含上游 Key</b>；要带密钥必须填口令，导出的是加密块。导入默认只预演，确认后再写入。</p>
-  <div class="row">
-    <button id="mg-export">导出迁移包</button>
-    <input id="mg-pass" type="password" placeholder="口令（含密钥时必填，≥8 位）" style="min-width:240px">
-    <label style="margin-left:12px"><input id="mg-secrets" type="checkbox"> 包含上游 Key</label>
-  </div>
-  <div class="row" style="margin-top:12px">
-    <input id="mg-file" type="file" accept="application/json">
-    <button id="mg-dry">预演导入</button>
-    <button id="mg-apply">确认导入</button>
-    <span class="hint" id="mg-msg"></span>
-  </div>
 </section>
 </div>
 
@@ -3129,8 +3129,31 @@ function loadPane(name){
   if(name==='theme'){loadTheme();return;}
   if(name==='audit'){loadAudit();return;}
   if(name==='server'){loadServer();return;}
-  if(name==='migrate'){mgInit();return;}
 }
+
+
+// 导航状态灯：绿=正常、黄=有渠道在冷却、红=无可用渠道
+function navDots(){
+  api('GET','/api/state').then(function(s){
+    var keys=(s&&s.keys)||[];
+    var total=keys.length, bad=0, cool=0;
+    keys.forEach(function(k){
+      var st=(k.state||k.status||'').toLowerCase();
+      if(st.indexOf('cool')>=0||st.indexOf('冷却')>=0){cool++;} 
+      if(st.indexOf('disabled')>=0||st.indexOf('trip')>=0){bad++;}
+    });
+    var level = (total===0||bad>=total) ? 'bad' : (cool>0||bad>0 ? 'warn' : 'ok');
+    document.querySelectorAll('#tabs .dot').forEach(function(d){
+      d.className='dot '+level;
+    });
+  }).catch(function(){});
+}
+
+document.querySelectorAll('#tabs button').forEach(function(b){
+  if(!b.querySelector('.dot')){ var d=document.createElement('span'); d.className='dot'; b.insertBefore(d,b.firstChild); }
+});
+navDots();
+setInterval(navDots, 15000);
 
 document.getElementById('tabs').onclick=function(ev){
   var b=ev.target.closest('button');if(!b){return;}
@@ -3161,51 +3184,6 @@ function loadServer(){
     document.getElementById('sv-rows').innerHTML='<tr><td colspan="2">读取失败：'+e.message+'</td></tr>';
   });
 }
-
-// ---- 迁移 ----
-function mgInit(){}
-
-document.getElementById('mg-export').onclick=function(){
-  var body={include_secrets:document.getElementById('mg-secrets').checked,
-            password:document.getElementById('mg-pass').value};
-  document.getElementById('mg-msg').textContent='导出中…';
-  api('POST','/api/export',body).then(function(bundle){
-    var blob=new Blob([JSON.stringify(bundle,null,1)],{type:'application/json'});
-    var a=document.createElement('a');
-    a.href=URL.createObjectURL(blob);
-    a.download='relayhub-migrate-'+Date.now()+'.json';
-    a.click();
-    setTimeout(function(){URL.revokeObjectURL(a.href);},2000);
-    document.getElementById('mg-msg').textContent='已导出（含密钥：'+(bundle.include_secrets?'是':'否')+'）';
-  }).catch(function(e){
-    document.getElementById('mg-msg').textContent='导出失败：'+e.message;});
-};
-
-function mgRead(){
-  return new Promise(function(resolve,reject){
-    var f=document.getElementById('mg-file').files[0];
-    if(!f){reject(new Error('先选一个迁移包'));return;}
-    var r=new FileReader();
-    r.onload=function(){try{resolve(JSON.parse(r.result));}catch(err){reject(new Error('不是合法 JSON'));}};
-    r.readAsText(f);
-  });
-}
-
-function mgRun(dry){
-  document.getElementById('mg-msg').textContent=dry?'预演中…':'导入中…';
-  mgRead().then(function(bundle){
-    return api('POST','/api/import',{bundle:bundle,dry_run:dry});
-  }).then(function(r){
-    document.getElementById('mg-msg').textContent=(r.dry_run?'预演':'已导入')+'：新增用户 '+r.users_added+'，新增令牌 '+r.tokens_added+(r.skipped_users.length?('，跳过用户 '+r.skipped_users.join('、')):'');
-  }).catch(function(e){
-    document.getElementById('mg-msg').textContent='失败：'+e.message;});
-}
-
-document.getElementById('mg-dry').onclick=function(){mgRun(true);};
-document.getElementById('mg-apply').onclick=function(){
-  if(!confirm('确认写入？同名用户与同哈希令牌会被跳过，现有账号不会被覆盖。')){return;}
-  mgRun(false);
-};
 
 // ---- new-api 账单（管理员功能） ----
 
