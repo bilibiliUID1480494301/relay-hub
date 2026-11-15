@@ -182,6 +182,8 @@ class UserPool:
         timezone: str = "Asia/Shanghai",
         per_call: float = 0.0,
         cache_read_ratio: float = 0.1,
+        cache_read_price_per_1k: float | None = None,
+        cache_write_price_per_1k: float | None = None,
         time_rules: list | None = None,
         peak_multiplier: float = 1.0,
     ) -> None:
@@ -197,6 +199,14 @@ class UserPool:
         self.per_call = max(0.0, float(per_call or 0.0))
         # 上游缓存命中的输入按这个比例计价（DeepSeek/Anthropic 实测约 1/10）
         self.cache_read_ratio = min(1.0, max(0.0, float(cache_read_ratio or 0.0)))
+        # 缓存命中输入的**绝对单价**（每 1000 token）。给了它就不再用比例。
+        # 缓存写入（创建）输入的绝对单价。None = 不额外收费（并入输入价）。
+        self.cache_write_price_per_1k = (
+            None if cache_write_price_per_1k is None else max(0.0, float(cache_write_price_per_1k))
+        )
+        self.cache_read_price_per_1k = (
+            None if cache_read_price_per_1k is None else max(0.0, float(cache_read_price_per_1k))
+        )
         # 原始配置留一份（管理面要回显），编译结果另存（匹配用）
         self.time_rules_raw = list(time_rules or [])
         self.time_rules = timerules_module.compile_rules(self.time_rules_raw)
@@ -222,6 +232,8 @@ class UserPool:
             timezone=str(raw.get("timezone") or "Asia/Shanghai"),
             per_call=float(raw.get("per_call") or 0.0),
             cache_read_ratio=float(raw.get("cache_read_ratio") or 0.1),
+            cache_read_price_per_1k=raw.get("cache_read_price_per_1k"),
+            cache_write_price_per_1k=raw.get("cache_write_price_per_1k"),
             time_rules=raw.get("time_rules") or [],
             peak_multiplier=float(raw.get("peak_multiplier", 1.0) or 1.0),
         )
@@ -279,6 +291,10 @@ class UserPool:
         tokens_out: int,
         ts: float | None = None,
         cache_read: int = 0,
+        channel_ratio: float | None = None,
+        channel_cache_price: float | None = None,
+        cache_write: int = 0,
+        channel_cache_write_price: float | None = None,
     ) -> int:
         """按 tokens 折点 × 分组倍率 × 分时倍率，向上取整。额度 -1 不参与计费。
 
@@ -287,11 +303,25 @@ class UserPool:
         """
         if user.quota < 0:
             return 0
+        # 渠道自带折价比例时优先用它：OpenAI 系渠道是 0.5，不是 0.1
+        ratio = self.cache_read_ratio if channel_ratio is None else min(
+            1.0, max(0.0, float(channel_ratio))
+        )
         cached = max(0, min(int(cache_read or 0), tokens_in))
+        # 绝对价优先：渠道 > 站点 > 比例折算
+        cache_price = channel_cache_price
+        if cache_price is None:
+            cache_price = self.cache_read_price_per_1k
+        write_price = channel_cache_write_price
+        if write_price is None:
+            write_price = self.cache_write_price_per_1k
         fresh_in = tokens_in - cached
         base = (
             fresh_in / 1000.0 * self.price_in_per_1k
-            + cached / 1000.0 * self.price_in_per_1k * self.cache_read_ratio
+            + (cached / 1000.0 * cache_price if cache_price is not None
+               else cached / 1000.0 * self.price_in_per_1k * ratio)
+            + (max(0, int(cache_write or 0)) / 1000.0 * write_price
+               if write_price is not None else 0.0)
             + tokens_out / 1000.0 * self.price_out_per_1k
             + self.per_call
         )

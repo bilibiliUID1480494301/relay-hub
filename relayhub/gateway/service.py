@@ -3198,7 +3198,11 @@ class RelayHandler(BaseHTTPRequestHandler):
                 fresh = self.users.pool.get(identity.user_id)
                 if fresh is not None:
                     if ok:
-                        cost = self.users.pool.cost_of(fresh, tokens_in, tokens_out, ts=started, cache_read=cache_read)
+                        cost = self.users.pool.cost_of(fresh, tokens_in, tokens_out, ts=started, cache_read=cache_read,
+                                 channel_ratio=getattr(getattr(outcome, "key", None), "cache_read_ratio", None),
+                                 channel_cache_price=getattr(getattr(outcome, "key", None), "cache_read_price_per_1k", None),
+                                 cache_write=cache_creation,
+                                 channel_cache_write_price=getattr(getattr(outcome, "key", None), "cache_write_price_per_1k", None))
                         self.users.settle(identity.user_id, pre, cost)  # 多退少补
                     else:
                         # 流中断：上游已消费整段输入，按预扣额结清（不上浮也不退还）
@@ -3237,7 +3241,11 @@ class RelayHandler(BaseHTTPRequestHandler):
         if identity is not None and identity.user_id and self.users:
             fresh = self.users.pool.get(identity.user_id)
             if fresh is not None:
-                cost = self.users.pool.cost_of(fresh, tokens_in, tokens_out, ts=started, cache_read=cache_read)
+                cost = self.users.pool.cost_of(fresh, tokens_in, tokens_out, ts=started, cache_read=cache_read,
+                                 channel_ratio=getattr(getattr(outcome, "key", None), "cache_read_ratio", None),
+                                 channel_cache_price=getattr(getattr(outcome, "key", None), "cache_read_price_per_1k", None),
+                                 cache_write=cache_creation,
+                                 channel_cache_write_price=getattr(getattr(outcome, "key", None), "cache_write_price_per_1k", None))
                 self.users.settle(identity.user_id, pre, cost)  # 多退少补
         # 记账赶在写响应之前：响应字节一出去，客户端就可能立刻断开，
         # 账还没落盘就被读到旧值（测试里表现为偶发丢一次）。

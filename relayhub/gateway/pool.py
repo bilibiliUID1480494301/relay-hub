@@ -146,6 +146,12 @@ class UpstreamKey:
     # 有映射时客户端只见对外名（干净名），请求进渠前改写成上游名；
     # 无映射时对外名 = models 里的名字。
     model_mapping: dict[str, str] = field(default_factory=dict)
+    # 该渠道的上游缓存命中折价比例。缺省 0.1；OpenAI 系渠道应设 0.5。
+    cache_read_ratio: float = 0.1
+    # 该渠道缓存命中的绝对单价（每 1000 token）。None = 用比例折算。
+    cache_read_price_per_1k: float | None = None
+    # 该渠道缓存写入的绝对单价（每 1000 token）。None = 不额外收费。
+    cache_write_price_per_1k: float | None = None
     # 调度优先级（对标 new-api channel priority）：数值越大越优先。
     # 同优先级内按策略（round_robin 等）分配；高优先级全部冷却/失败后
     # 才落到低优先级——「主/备」语义。

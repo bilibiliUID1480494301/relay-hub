@@ -67,7 +67,7 @@ relayhub.gateway admin  --port 18802 --token 你定的口令</code></pre>
 <li>峰谷按配置的时区算（默认 <code>Asia/Shanghai</code>），不看服务器本地时间</li>
 <li>时段规则表：星期 + 小时区间 + 节假日，顺序匹配，第一条命中生效</li>
 <li>按次收费可以和 token 计价叠加</li>
-<li>缓存命中按<strong>该渠道</strong>的上游比例折价：DeepSeek 与 Anthropic 配 1/10，OpenAI 配 1/2。多渠道路由到哪家就按哪家的比例算。</li>
+<li>缓存命中（cache_read）与缓存写入（cache_creation）<strong>各自可独立定价</strong>：可配绝对单价，也可配相对输入价的比例。优先级：渠道绝对价 &gt; 站点绝对价 &gt; 比例折算。常见配置：DeepSeek 命中 0.1×、OpenAI 命中 0.5×、Anthropic 写入 1.25×。</li>
 <li><code>quota = -1</code> 的账号不参与计费</li>
 </ul>
 

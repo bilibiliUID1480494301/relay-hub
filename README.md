@@ -783,3 +783,17 @@ relayhub.gateway serve --pool %LOCALAPPDATA%/relay-hub/pool.json --api-key my-ma
 ## License 许可证
 
 [MIT](./LICENSE)
+
+## 缓存计费
+
+命中（`cache_read`）与写入（`cache_creation`）可以各自独立定价，优先级：
+
+```
+渠道 cache_*_price_per_1k   →  站点 cache_*_price_per_1k   →  cache_read_ratio × 输入价
+```
+
+```json
+{"cache_read_price_per_1k": 0.3, "cache_write_price_per_1k": 3.75}
+```
+
+不配绝对价时按比例折算（默认 0.1）；`cache_creation` 未配置则不额外收费。
