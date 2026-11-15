@@ -38,6 +38,7 @@ from .. import __version__ as relayhub_version
 from .. import __version__ as _version
 from . import migrate as migrate_module
 from . import users as user_module
+from . import wallpaper as wallpaper_module
 from . import tokens as token_module
 from . import persist as persist_module
 from . import drift as drift_module
@@ -2126,6 +2127,10 @@ class AdminHandler(BaseHTTPRequestHandler):
         return {
             "bg_color": str(raw.get("bg_color") or ""),
             "bg_image": str(raw.get("bg_image") or ""),
+            "bg_images": wallpaper_module.clean_images(raw.get("bg_images") or []),
+            "bg_mode": str(raw.get("bg_mode") or "static"),
+            "bg_rotate_seconds": wallpaper_module.clamp_seconds(raw.get("bg_rotate_seconds")),
+            "bg_api_url": wallpaper_module.clean_api_url(raw.get("bg_api_url") or ""),
         }
 
     def _update_webui(self) -> None:
@@ -2140,14 +2145,37 @@ class AdminHandler(BaseHTTPRequestHandler):
         if image and not _webui_image_ok(image):
             self._error(400, "背景图必须是 http(s):// 图片地址（不含空格与引号）")
             return
-        payload = {"bg_color": color, "bg_image": image, "updated_at": round(time.time(), 3)}
+        images = wallpaper_module.clean_images(body.get("bg_images") or [])
+        mode = str(body.get("bg_mode") or "static").strip().lower()
+        if mode not in wallpaper_module.MODES:
+            self._error(400, "壁纸模式只能是 static / rotate / api")
+            return
+        api_url = wallpaper_module.clean_api_url(body.get("bg_api_url") or "")
+        if str(body.get("bg_api_url") or "").strip() and not api_url:
+            self._error(400, "壁纸 API 必须是 https 地址")
+            return
+        if mode == "rotate" and len(images) < 2:
+            self._error(400, "轮换模式至少需要两张壁纸")
+            return
+        if mode == "api" and not api_url:
+            self._error(400, "API 模式必须填壁纸接口地址（https）")
+            return
+        payload = {
+            "bg_color": color,
+            "bg_image": image,
+            "bg_images": images,
+            "bg_mode": mode,
+            "bg_rotate_seconds": wallpaper_module.clamp_seconds(body.get("bg_rotate_seconds")),
+            "bg_api_url": api_url,
+            "updated_at": round(time.time(), 3),
+        }
         atomicio.write_json_atomic(paths.webui_theme_path(), payload)
         audit_module.record(
             "webui.theme_updated",
             path=self.server.audit_path,  # type: ignore[attr-defined]
             bg_color=bool(color), bg_image=bool(image),
         )
-        self._send_json(200, {"bg_color": color, "bg_image": image})
+        self._send_json(200, {k: v for k, v in payload.items() if k != "updated_at"})
 
 
 

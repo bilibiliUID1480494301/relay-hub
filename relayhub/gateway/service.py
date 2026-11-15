@@ -18,6 +18,7 @@ import secrets
 import socket
 import sys
 import threading
+import traceback
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ from . import mcp as mcp_module
 from . import clients as clients_module
 from . import pluginlogs
 from . import reqlog
+from . import wallpaper as wallpaper_module
 from . import features as features_module
 from . import gemini_api
 from . import site as site_module
@@ -803,6 +805,41 @@ except ValueError:
 RELAY_LOOP_STATUS = 429
 
 
+_WALLPAPER_CACHE: dict[str, tuple[float, str]] = {}
+_WALLPAPER_TTL = 30.0
+
+
+def _fetch_wallpaper_url() -> str:
+    """服务端代取壁纸地址：上游 Key 只在这里出现，绝不下发给浏览器。"""
+    import urllib.request
+
+    wp = _panel_wallpaper()
+    if wp.get("mode") != "api" or not wp.get("api_url"):
+        return ""
+    api = wp["api_url"]
+    now = time.time()
+    cached = _WALLPAPER_CACHE.get(api)
+    if cached and now - cached[0] < _WALLPAPER_TTL:
+        return cached[1]
+    headers = {"accept": "application/json, text/plain;q=0.9"}
+    if wp.get("api_key"):
+        header = wp.get("api_header") or "Authorization"
+        value = wp["api_key"]
+        if header.lower() == "authorization" and not value.lower().startswith(("bearer ", "basic ")):
+            value = "Bearer " + value
+        headers[header] = value
+    try:
+        request = urllib.request.Request(api, headers=headers, method="GET")
+        with urllib.request.urlopen(request, timeout=6) as response:
+            raw = response.read(4096).decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 - 取不到就安静降级，不把上游错误带给浏览器
+        return cached[1] if cached else ""
+    url = wallpaper_module.pick_url(raw)
+    if url:
+        _WALLPAPER_CACHE[api] = (now, url)
+    return url
+
+
 def _panel_bg_css() -> str:
     """从 webui.json 读外观配置，生成 body 背景 CSS。
 
@@ -830,8 +867,23 @@ def _panel_bg_css() -> str:
 
 
 def _apply_panel_theme(html: str) -> str:
-    """把背景 CSS 注入面板模板的占位符（没有占位符就原样返回）。"""
-    return html.replace("__THEME_BG__", _panel_bg_css(), 1)
+    """把背景 CSS 与壁纸轮换脚本注入面板模板。"""
+    html = html.replace("__THEME_BG__", _panel_bg_css(), 1)
+    script = wallpaper_module.rotate_script(_panel_wallpaper())
+    if script:
+        if "__THEME_JS__" in html:
+            html = html.replace("__THEME_JS__", script, 1)
+        else:
+            html = html.replace("</body>", script + "</body>", 1)
+    return html
+
+
+def _panel_wallpaper() -> dict:
+    try:
+        cfg = json.loads(paths.webui_theme_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return wallpaper_module.normalize({})
+    return wallpaper_module.normalize(cfg)
 
 
 def _theme_vars(config) -> str:
@@ -2022,6 +2074,9 @@ class RelayHandler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path != "/":
             path = path.rstrip("/")
+        if path == "/panel/wallpaper":
+            self._panel_wallpaper_json()
+            return
         if path == "/":
             # 落地页：给「在浏览器里打开域名看一眼」的人一个明确的回应。
             # 刻意不含模型清单与任何凭证线索——那些都在鉴权之后。
@@ -2282,13 +2337,57 @@ class RelayHandler(BaseHTTPRequestHandler):
             # 兜底：handler 里抛未捕获异常时，socketserver 只会静默掐断连接，
             # 客户端看到的是 RemoteDisconnected（像网络问题），排查方向会被带偏。
             # 宁可回一个难看的 500，也让它带上真实错误。
-            self.log_error("处理请求时未捕获异常：%r", exc)
+            self._note_unhandled(exc)
             fragment = self.path.split("?")[0].rstrip("/")
             dialect = "openai" if fragment == "/v1/chat/completions" else "anthropic"
             try:
                 self._error(500, f"中转站内部错误：{type(exc).__name__}: {exc}", "api_error", dialect)
             except OSError:
                 pass
+
+    def _panel_wallpaper_json(self) -> None:
+        """给面板自己的代理端点：返回 {url}，不含任何凭据。"""
+        url = _fetch_wallpaper_url()
+        if not url:
+            self._error(404, "未配置壁纸接口或暂时取不到")
+            return
+        self._send_json(200, {"url": url})
+
+    def _note_unhandled(self, exc: BaseException) -> None:
+        """500 必须可查：stderr（pythonw 下无处可去）+ errors.log + 请求日志。
+
+        `self.path` 落盘前**去掉 query**：`?token=` 这类凭据不该进错误日志。
+        """
+        self.log_error("处理请求时未捕获异常：%r", exc)
+        detail = traceback.format_exc()
+        log_path = self.request_log
+        if not log_path:
+            return
+        safe_path = self.path.split("?", 1)[0]
+        error_log = Path(log_path).with_name("errors.log")
+        try:
+            if error_log.exists() and error_log.stat().st_size > 5_000_000:
+                error_log.replace(error_log.with_suffix(".log.1"))
+        except OSError:
+            pass
+        try:
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            header = f"===== {stamp} {safe_path} from {self._client_ip()} ====="
+            with open(error_log, "a", encoding="utf-8") as fh:
+                fh.write(chr(10) + header + chr(10) + detail)
+        except OSError:
+            pass
+        try:
+            reqlog.record(
+                Path(log_path),
+                status=500,
+                ok=False,
+                reason=f"unhandled {type(exc).__name__}: {str(exc)[:80]}",
+                request_id=getattr(self, "_current_request_id", ""),
+                ip=self._client_ip(),
+            )
+        except Exception:  # noqa: BLE001 - 记日志失败绝不能盖住原始错误
+            pass
 
     def _post(self) -> None:
         path = self.path.split("?")[0].rstrip("/")
