@@ -18,6 +18,7 @@ import secrets
 import socket
 import sys
 import threading
+from urllib.parse import parse_qs, urlsplit
 import traceback
 import time
 import uuid
@@ -37,6 +38,7 @@ from . import clients as clients_module
 from . import pluginlogs
 from . import landing as landing_module
 from . import reqlog
+from . import usageagg as usageagg_module
 from . import wallpaper as wallpaper_module
 from . import features as features_module
 from . import gemini_api
@@ -986,6 +988,28 @@ async function refresh(){
   if(r.status===401){renderAuth(false);return;}
   var u=await r.json();
   renderHome(u);
+  loadUsage();
+}
+async function loadUsage(){
+  // 「我的客户端」：只有本人能看，服务端强制 session 身份
+  var app=document.getElementById('app'); if(!app) return;
+  var box=document.createElement('div'); box.className='usage';
+  app.appendChild(box);
+  try{
+    var r=await fetch(base+'/api/user/usage?days=7',{credentials:'same-origin'});
+    if(!r.ok){box.remove();return;}
+    var d=await r.json();
+    var rows=(d.by_client||[]).map(function(x){
+      return '<tr><td>'+esc(x.client)+'</td><td class="mono">'+x.requests+'</td>'+
+             '<td class="mono">'+(x.tokens_in||0)+'&rarr;'+(x.tokens_out||0)+'</td>'+
+             '<td class="mono">'+x.cost+'</td></tr>';
+    }).join('');
+    var direct=d.direct||{requests:0,cost:0};
+    box.innerHTML='<h3>我的客户端（近 '+(d.days||7)+' 天）</h3>'+
+      (rows?'<table><tr><th>客户端</th><th>请求</th><th>tokens</th><th>扣点</th></tr>'+rows+'</table>'
+           :'<p class="sub">还没有带客户端标识的调用</p>')+
+      '<p class="sub">直连 API 令牌：'+direct.requests+' 次 / '+direct.cost+' 点（不分账，已计入总量）</p>';
+  }catch(e){ box.remove(); }
 }
 function renderAuth(showRegister){
   h('<h2>__SITE__ 用户面板</h2><p class="sub">'+(showRegister?'注册或登录以获取 API Key':'登录以管理你的 API Key 与额度')+'</p>'+
@@ -1417,6 +1441,9 @@ class RelayHandler(BaseHTTPRequestHandler):
                     cookie=sid,
                     cookie_max_age=int(self.SESSION_TTL),
                 )
+                return
+            if path == "/api/user/usage":
+                self._user_usage()
                 return
             if path == "/api/auth/login":
                 body = self._read_json() or {}
@@ -2355,6 +2382,33 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._error(404, "未配置壁纸接口或暂时取不到")
             return
         self._send_json(200, {"url": url})
+
+    def _user_usage(self) -> None:
+        """用户自查各客户端用量。
+
+        隐私边界：**强制 session 身份**——`?user=` 一律忽略，A 查不到 B 的明细。
+        站长能看的最大粒度是「按用户」，客户端维度只属于用户本人。
+        """
+        user = self._session_user()
+        if user is None:
+            self._send_json(401, {"ok": False, "error": "请先登录"})
+            return
+        query = parse_qs(urlsplit(self.path).query)
+        try:
+            days = int((query.get("days") or ["7"])[0])
+        except ValueError:
+            days = 7
+        days = max(1, min(90, days))
+
+        names = {tok.name for tok in self.tokens.tokens_of(user.user_id)} if self.tokens else set()
+        since = time.time() - days * 86400
+        entries = []
+        if names and self.request_log:
+            for item in reqlog.tail(Path(self.request_log), limit=20000):
+                if item.get("token") in names:
+                    entries.append(item)
+        report = usageagg_module.aggregate(entries, since=since, group_by="client")
+        self._send_json(200, {"ok": True, "days": days, **report})
 
     def _note_unhandled(self, exc: BaseException) -> None:
         """500 必须可查：stderr（pythonw 下无处可去）+ errors.log + 请求日志。
