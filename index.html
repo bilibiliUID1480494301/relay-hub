@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>relay-hub</title>
+<meta name="description" content="relay-hub：把 OpenAI / Anthropic / Gemini 三种协议互相转换的 LLM 网关，带用户额度与按 token 计费。">
+<style>
+body{
+  max-width:44rem;margin:0 auto;padding:3rem 1.25rem 6rem;
+  background:#fff;color:#111;
+  font:16px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+}
+a{color:#0b5cad;text-decoration:none;border-bottom:1px solid #cfe0f2}
+a:hover{border-bottom-color:#0b5cad}
+h1{font:600 28px/1.3 ui-monospace,Consolas,monospace;margin:0 0 .25rem;letter-spacing:-.5px}
+h2{font-size:17px;margin:2.5rem 0 .6rem;padding-bottom:.3rem;border-bottom:1px solid #e6e6e6}
+p,ul,ol,pre,table{margin:0 0 1rem}
+ul,ol{padding-left:1.3rem}
+li{margin:.2rem 0}
+code{font-family:ui-monospace,Consolas,monospace;font-size:.9em;background:#f4f4f4;padding:.1em .35em;border-radius:3px}
+pre{background:#f7f7f7;border:1px solid #e6e6e6;border-radius:4px;padding:.9rem 1rem;overflow-x:auto;font-size:13.5px;line-height:1.55}
+pre code{background:none;padding:0}
+table{border-collapse:collapse;font-size:14.5px;width:100%}
+th,td{text-align:left;padding:.4rem .6rem .4rem 0;border-bottom:1px solid #eee;vertical-align:top}
+th{font-weight:600;color:#555}
+.sub{color:#666;margin:0 0 2rem}
+.rule{color:#666;font-size:14.5px;border-left:2px solid #ddd;padding-left:.75rem;margin:1rem 0}
+footer{margin-top:3rem;padding-top:1rem;border-top:1px solid #e6e6e6;color:#777;font-size:13.5px}
+@media(max-width:520px){body{padding:2rem 1rem 4rem}}
+</style>
+</head>
+<body>
+
+<h1>relay-hub</h1>
+<p class="sub">LLM 网关。把 OpenAI、Anthropic、Gemini 三种协议互相转换，外加用户额度与按 token 计费。<br>
+纯 Python 标准库，不依赖任何第三方包。<a href="https://pypi.org/project/hubrelay/">PyPI</a> · <a href="https://github.com/bilibiliUID1480494301/relay-hub">GitHub</a></p>
+
+<h2>装和跑</h2>
+<pre><code>pip install hubrelay
+
+relayhub.gateway users init --username admin   # 密码只打印一次
+relayhub.gateway serve  --port 8799  --pool pool.json
+relayhub.gateway admin  --port 18802 --token 你定的口令</code></pre>
+<p>管理面在 <code>localhost:18802</code>，加完上游渠道就可以转发。不带 <code>--pool</code> 会走演示池，只够验证连通性。</p>
+
+<pre><code>curl localhost:8799/v1/chat/completions \
+  -H "Authorization: Bearer sk-xxx" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"你好"}]}'</code></pre>
+
+<h2>端点</h2>
+<table>
+<tr><th>路径</th><th>协议</th></tr>
+<tr><td><code>/v1/chat/completions</code></td><td>OpenAI Chat（含流式）</td></tr>
+<tr><td><code>/v1/responses</code></td><td>OpenAI Responses</td></tr>
+<tr><td><code>/v1/messages</code></td><td>Anthropic Messages（含 tool_use / stream）</td></tr>
+<tr><td><code>/v1beta/models/{model}:generateContent</code></td><td>Gemini 原生（含 <code>:streamGenerateContent</code>）</td></tr>
+<tr><td><code>/v1/embeddings</code></td><td>OpenAI Embeddings</td></tr>
+<tr><td><code>/healthz</code></td><td>探活，免凭证</td></tr>
+</table>
+<p>上游侧按渠道配 <code>anthropic-messages</code> / <code>openai-chat</code> / <code>gemini-api</code>，进来的协议由网关转过去。</p>
+
+<h2>计费</h2>
+<pre><code>cost = 未命中输入×单价 + 命中缓存×单价×折扣率 + 输出×单价 + 按次
+     × 分组倍率 × 时段倍率</code></pre>
+<ul>
+<li>峰谷按配置的时区算（默认 <code>Asia/Shanghai</code>），不看服务器本地时间</li>
+<li>时段规则表：星期 + 小时区间 + 节假日，顺序匹配，第一条命中生效</li>
+<li>按次收费可以和 token 计价叠加</li>
+<li>缓存命中按<strong>该渠道</strong>的上游比例折价：DeepSeek 与 Anthropic 配 1/10，OpenAI 配 1/2。多渠道路由到哪家就按哪家的比例算。</li>
+<li><code>quota = -1</code> 的账号不参与计费</li>
+</ul>
+
+<h2>几条实话</h2>
+<ul>
+<li>模型不在网关里跑，推理发生在上游。但推理开关会跟着协议转换：OpenAI 的 <code>reasoning_effort</code> 和 Anthropic 的 <code>thinking.budget_tokens</code> 互相对应，不会被静默丢掉。</li>
+<li>单进程多线程模型。并发压满时先加实例，前面挂一层反向代理做分发。</li>
+<li>不用 Redis 也不用数据库，所以多实例之间不共享内存态（会话、失败计数各自独立）。</li>
+<li>令牌和接入凭据只存哈希，明文只在创建时返回一次，找不回来就重发。</li>
+<li>请求正文不落盘。日志只有模型、token 数、耗时、状态码。</li>
+<li>「哪个客户端在调」这种数据只有用户本人能看，站长最多看到按用户的汇总。</li>
+</ul>
+
+<h2>不想装东西的话</h2>
+<p>没有 Redis、没有数据库、没有 Node 构建链。配置就是几个 JSON 文件，放在 <code>%LOCALAPPDATA%</code> 或 <code>$XDG_DATA_HOME</code> 下的 relay-hub 目录，换机器拷过去就行。</p>
+
+<footer>
+MIT · 问题请开 <a href="https://github.com/bilibiliUID1480494301/relay-hub/issues">issue</a>
+</footer>
+
+</body>
+</html>
