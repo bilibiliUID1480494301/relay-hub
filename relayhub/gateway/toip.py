@@ -289,6 +289,9 @@ class Ticket:
     last_used: float = 0.0
     last_ip: str = ""
     note: str = ""
+    # 归属用户（users.py 的 user_id）。空 = 站点级通行证（发给插件、按站点计费）；
+    # 非空 = 用户自建通行证，用量记在该用户名下，用户被删即失效。
+    owner_user_id: str = ""
 
     def is_expired(self, *, clock: Callable[[], float] = time.time) -> bool:
         return bool(self.expires_at) and clock() >= float(self.expires_at)
@@ -305,6 +308,7 @@ def make_ticket(
     plugins: Iterable[str] = (),
     ttl: float = 0.0,
     note: str = "",
+    owner_user_id: str = "",
     clock: Callable[[], float] = time.time,
 ) -> tuple[Ticket, str]:
     """造一枚 ticket，返回 (记录, 明文)。明文只在这一刻存在。"""
@@ -319,6 +323,7 @@ def make_ticket(
         created_at=clock(),
         expires_at=(clock() + ttl) if ttl else 0.0,
         note=note.strip(),
+        owner_user_id=str(owner_user_id or ""),
     )
     return record, secret
 
@@ -737,6 +742,9 @@ class ToipService:
             token_id=str(uuid.uuid4()),
             name=device,
             token=token_plain,
+            # 归属随票据走：用户自建的票换出的令牌记在该用户名下（计费跟着走），
+            # 站点级票据仍为空 = 不参与用户计费。
+            user_id=record.owner_user_id,
             note=f"toip:{plugin}",
             expires_at=(self._clock() + self.session_ttl) if self.session_ttl else 0.0,
         )
@@ -835,3 +843,38 @@ def rotate_secret(
 
     audit.record("toip.rotate", station_id=station.station_id)
     return station
+
+
+def issue_for_user(
+    store: "TicketStore",
+    user_id: str,
+    name: str,
+    *,
+    plugins: Iterable[str] = (),
+    ttl: float = 0.0,
+    note: str = "",
+    clock: Callable[[], float] = time.time,
+) -> tuple[Ticket, str]:
+    """为用户本人签发一枚通行证（用量记在该用户名下）。
+
+    与站点级通行证共用同一套存储，靠 `owner_user_id` 区分归属；
+    用户被删除/禁用时由 users 侧调用 `revoke_owner` 联动吊销。
+    """
+    if not str(user_id or "").strip():
+        raise ToipError("用户自建通行证必须带 user_id")
+    record, secret = make_ticket(
+        name=name, plugins=plugins, ttl=ttl, note=note,
+        owner_user_id=user_id, clock=clock,
+    )
+    store.add(record)
+    return record, secret
+
+
+def revoke_owner(store: "TicketStore", user_id: str) -> int:
+    """吊销某用户名下全部通行证，返回吊销数量。"""
+    removed = 0
+    for ticket in list(store.tickets):
+        if ticket.owner_user_id and ticket.owner_user_id == user_id:
+            if store.remove(ticket.ticket_id):
+                removed += 1
+    return removed

@@ -988,7 +988,30 @@ async function refresh(){
   if(r.status===401){renderAuth(false);return;}
   var u=await r.json();
   renderHome(u);
+  var blk=document.getElementById('app');
+  if(blk){ var div=document.createElement('div'); div.innerHTML=ticketBlock(); blk.appendChild(div); }
   loadUsage();
+}
+async function issueMyTicket(){
+  // 为自己签发一枚 TOIP 通行证：明文只显示这一次
+  var app=document.getElementById('app'); if(!app) return;
+  var box=document.getElementById('tk'); if(!box) return;
+  box.innerHTML='<p class="sub">签发中…</p>';
+  try{
+    var r=await fetch(base+'/api/user/toip',{method:'POST',credentials:'same-origin',
+      headers:{'content-type':'application/json'},body:JSON.stringify({name:'我的客户端'})});
+    var j=await r.json();
+    if(!j.ok){box.innerHTML='<p class="err">'+esc(j.error||'签发失败')+'</p>';return;}
+    box.innerHTML='<p class="sub">明文只显示这一次，请立即复制保存</p>'+
+      '<dl><dt>通行证</dt><dd class="mono">'+esc(j.ticket)+'</dd>'+
+      '<dt>名称</dt><dd>'+esc(j.name)+'</dd></dl>';
+  }catch(e){ box.innerHTML='<p class="err">连不上服务</p>'; }
+}
+function ticketBlock(){
+  return '<h3>我的通行证（TOIP）</h3>'+
+    '<p class="sub">给你的插件接入用；用量记在你自己名下。</p>'+
+    '<button onclick="issueMyTicket()">生成我的通行证</button>'+
+    '<div id="tk"></div>';
 }
 async function loadUsage(){
   // 「我的客户端」：只有本人能看，服务端强制 session 身份
@@ -1441,6 +1464,9 @@ class RelayHandler(BaseHTTPRequestHandler):
                     cookie=sid,
                     cookie_max_age=int(self.SESSION_TTL),
                 )
+                return
+            if path == "/api/user/toip":
+                self._user_toip()
                 return
             if path == "/api/user/usage":
                 self._user_usage()
@@ -2382,6 +2408,35 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._error(404, "未配置壁纸接口或暂时取不到")
             return
         self._send_json(200, {"url": url})
+
+    def _user_toip(self) -> None:
+        """为用户本人签发一枚 TOIP 通行证（明文只返回一次）。"""
+        user = self._session_user()
+        if user is None:
+            self._send_json(401, {"ok": False, "error": "请先登录"})
+            return
+        store = getattr(getattr(self, "toip", None), "tickets", None)
+        if store is None:
+            self._send_json(404, {"ok": False, "error": "本站未启用 TOIP"})
+            return
+        body = self._read_json() or {}
+        name = str(body.get("name") or f"{user.username} 的客户端").strip()
+        try:
+            ttl = max(0.0, float(body.get("ttl") or 0))
+        except (TypeError, ValueError):
+            ttl = 0.0
+        try:
+            record, secret = toip_module.issue_for_user(
+                store, user.user_id, name, ttl=ttl, note="用户自建"
+            )
+        except toip_module.ToipError as exc:
+            self._send_json(400, {"ok": False, "error": str(exc)[:200]})
+            return
+        self._send_json(200, {
+            "ok": True, "ticket": secret, "name": record.name,
+            "expires_at": record.expires_at,
+            "note": "明文只显示这一次，请立即保存",
+        })
 
     def _user_usage(self) -> None:
         """用户自查各客户端用量。

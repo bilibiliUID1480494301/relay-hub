@@ -17,8 +17,9 @@
 
 from __future__ import annotations
 
-import atexit
 import threading
+import os
+import atexit
 import json
 
 from .atomicio import ensure_private
@@ -144,7 +145,6 @@ def close_all() -> None:
         _HANDLES.clear()
 
 
-atexit.register(close_all)
 
 
 def record(
@@ -295,3 +295,6 @@ def summarize(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "by_channel": _bucket("channel"),
         "by_day": dict(sorted(day_buckets.items())),
     }
+
+
+atexit.register(close_all)   # 进程退出时关句柄，别让缓冲留在内存

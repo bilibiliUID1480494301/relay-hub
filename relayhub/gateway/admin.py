@@ -1230,6 +1230,13 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if "enabled" in body:
                     user.enabled = bool(body["enabled"])
                     changes.append(f"enabled={user.enabled}")
+                    if not user.enabled:
+                        # 停用即吊销自建通行证：账号停了，票不能还能接入
+                        try:
+                            store = toip_module.TicketStore(self.server.toip_tickets_path)  # type: ignore[attr-defined]
+                            toip_module.revoke_owner(store, user.user_id)
+                        except Exception as exc:  # noqa: BLE001 - 清理失败不挡停用
+                            self.log_error("吊销用户通行证失败：%r", exc)
                 if body.get("quota") is not None:
                     user.quota = int(body["quota"])
                     changes.append(f"quota={user.quota}")
@@ -1261,6 +1268,12 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if user is None:
                     raise UserError(f"找不到用户 {target}")
                 pool.users.remove(user)
+                # 删号即吊销其自建通行证：不留「人已删、票还能接入」的孤儿
+                try:
+                    store = toip_module.TicketStore(self.server.toip_tickets_path)  # type: ignore[attr-defined]
+                    toip_module.revoke_owner(store, user.user_id)
+                except Exception as exc:  # noqa: BLE001 - 票据清理失败不该挡住删号
+                    self.log_error("吊销用户通行证失败：%r", exc)
 
             try:
                 self._mutate_users(remove)
