@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from relayhub.gateway import wallpaper
 
 
@@ -83,3 +85,12 @@ def test_api_key_never_reaches_the_page():
     assert "/panel/wallpaper" in script
     assert "SUPER-SECRET-KEY" not in script
     assert "api.example" not in script          # 连上游域名都不给浏览器
+
+
+def test_admin_exposes_fit_option(tmp_path, monkeypatch):
+    """管理面必须能存/读 bg_fit，否则选了也白选（保存即丢）。"""
+    from relayhub.gateway import admin as admin_mod
+
+    src = admin_mod.PAGE_HTML + Path(admin_mod.__file__).read_text(encoding="utf-8")
+    assert "bg_fit" in src
+    assert "cover / contain" in src

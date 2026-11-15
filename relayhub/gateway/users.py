@@ -17,6 +17,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+
+from . import timerules as timerules_module
 import secrets
 import threading
 import time
@@ -177,6 +179,10 @@ class UserPool:
         price_out_per_1k: float = 6.0,
         groups: dict[str, float] | None = None,
         peak_hours: list[int] | None = None,
+        timezone: str = "Asia/Shanghai",
+        per_call: float = 0.0,
+        cache_read_ratio: float = 0.1,
+        time_rules: list | None = None,
         peak_multiplier: float = 1.0,
     ) -> None:
         self.users: list[User] = list(users or [])
@@ -187,6 +193,13 @@ class UserPool:
         self.groups: dict[str, float] = dict(groups or {"default": 1.0})
         # 分时计费：peak_hours = 峰时小时集合（0-23），峰时标价 × peak_multiplier，
         # 谷时恒 1.0（谷价就是标价）。空表或倍率 1 = 不启用。
+        self.timezone = str(timezone or "Asia/Shanghai")
+        self.per_call = max(0.0, float(per_call or 0.0))
+        # 上游缓存命中的输入按这个比例计价（DeepSeek/Anthropic 实测约 1/10）
+        self.cache_read_ratio = min(1.0, max(0.0, float(cache_read_ratio or 0.0)))
+        # 原始配置留一份（管理面要回显），编译结果另存（匹配用）
+        self.time_rules_raw = list(time_rules or [])
+        self.time_rules = timerules_module.compile_rules(self.time_rules_raw)
         self.peak_hours: set[int] = {
             int(h) for h in (peak_hours or []) if 0 <= int(h) <= 23
         }
@@ -206,6 +219,10 @@ class UserPool:
             price_out_per_1k=float(raw.get("price_out_per_1k", 6.0) or 0.0),
             groups={str(k): float(v) for k, v in (raw.get("groups") or {"default": 1.0}).items()},
             peak_hours=[int(h) for h in (raw.get("peak_hours") or []) if 0 <= int(h) <= 23],
+            timezone=str(raw.get("timezone") or "Asia/Shanghai"),
+            per_call=float(raw.get("per_call") or 0.0),
+            cache_read_ratio=float(raw.get("cache_read_ratio") or 0.1),
+            time_rules=raw.get("time_rules") or [],
             peak_multiplier=float(raw.get("peak_multiplier", 1.0) or 1.0),
         )
 
@@ -238,18 +255,46 @@ class UserPool:
 
     def time_multiplier(self, ts: float | None = None) -> float:
         """分时倍率：峰时（local hour ∈ peak_hours）返回 peak_multiplier，谷时恒 1.0。"""
+        # 规则表优先；没有规则才回落到旧的「峰时小时集合」
+        if self.time_rules:
+            return timerules_module.multiplier_for(self.time_rules, ts, self.timezone)
         if not self.peak_hours or self.peak_multiplier == 1.0:
             return 1.0
-        hour = time.localtime(ts if ts is not None else time.time()).tm_hour
+        # 按时区算峰谷：服务器常跑在 UTC，用本地时间会把峰谷整体错位
+        moment = ts if ts is not None else time.time()
+        try:
+            from zoneinfo import ZoneInfo
+
+            hour = time.localtime(moment).tm_hour if not self.timezone else (
+                __import__("datetime").datetime.fromtimestamp(moment, ZoneInfo(self.timezone)).hour
+            )
+        except Exception:  # noqa: BLE001 - 时区名写错不该让计费 500
+            hour = time.localtime(moment).tm_hour
         return self.peak_multiplier if hour in self.peak_hours else 1.0
 
     def cost_of(
-        self, user: User, tokens_in: int, tokens_out: int, ts: float | None = None
+        self,
+        user: User,
+        tokens_in: int,
+        tokens_out: int,
+        ts: float | None = None,
+        cache_read: int = 0,
     ) -> int:
-        """按 tokens 折点 × 分组倍率 × 分时倍率，向上取整。额度 -1 不参与计费。"""
+        """按 tokens 折点 × 分组倍率 × 分时倍率，向上取整。额度 -1 不参与计费。
+
+        `cache_read` 是命中上游缓存的输入 token：这部分按 `cache_read_ratio`
+        计价——上游本来就收得少，不折价等于对用户多收钱。
+        """
         if user.quota < 0:
             return 0
-        base = tokens_in / 1000.0 * self.price_in_per_1k + tokens_out / 1000.0 * self.price_out_per_1k
+        cached = max(0, min(int(cache_read or 0), tokens_in))
+        fresh_in = tokens_in - cached
+        base = (
+            fresh_in / 1000.0 * self.price_in_per_1k
+            + cached / 1000.0 * self.price_in_per_1k * self.cache_read_ratio
+            + tokens_out / 1000.0 * self.price_out_per_1k
+            + self.per_call
+        )
         if base <= 0:
             return 0
         return max(1, math.ceil(base * self.multiplier_for(user) * self.time_multiplier(ts)))

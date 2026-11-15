@@ -65,14 +65,16 @@ def clamp_seconds(value: object) -> int:
     return max(MIN_SECONDS, min(MAX_SECONDS, seconds))
 
 
-def clean_api_url(url: object) -> str:
-    """壁纸 API 只允许 https。"""
+def clean_api_url(url: object, allow_http: bool = False) -> str:
+    """壁纸 API 默认只允许 https；allow_http 是显式开关（自建/内网接口用）。"""
     text = str(url or "").strip()
     if not text or len(text) > 2000:
         return ""
     if any(ch in text for ch in _BAD_CHARS):
         return ""
-    return text if _HTTPS.match(text) else ""
+    if _HTTPS.match(text):
+        return text
+    return text if (allow_http and _HTTP_OR_HTTPS.match(text)) else ""
 
 
 def clean_api_key(value: object) -> str:
@@ -90,7 +92,8 @@ def normalize(config: dict[str, Any] | None) -> dict[str, Any]:
     single = clean_image(cfg.get("bg_image") or "")
     if single and single not in images:
         images.insert(0, single)
-    api_url = clean_api_url(cfg.get("bg_api_url") or "")
+    allow_http = bool(cfg.get("bg_api_allow_http"))
+    api_url = clean_api_url(cfg.get("bg_api_url") or "", allow_http=allow_http)
 
     mode = str(cfg.get("bg_mode") or "static").strip().lower()
     if mode not in MODES:
@@ -108,13 +111,15 @@ def normalize(config: dict[str, Any] | None) -> dict[str, Any]:
         "api_url": api_url,
         "api_key": clean_api_key(cfg.get("bg_api_key")),
         "api_header": str(cfg.get("bg_api_header") or "Authorization").strip() or "Authorization",
+        "allow_http": allow_http,
     }
 
 
 def rotate_script(wallpaper: dict[str, Any]) -> str:
     """轮换 / API 两种模式的注入脚本。
 
-    刻意不用 setInterval 叠加：每次先清旧定时器，避免手改配置后出现多条轮换。
+    注意：这里拼的是**会被浏览器解析的 JS**，拼接结果必须能被 node --check 通过
+    （tests/test_panel_js.py 守着这条）。不要再往里塞 try/catch 之类需要配平的结构。
     """
     mode = wallpaper.get("mode")
     if mode not in ("rotate", "api"):
@@ -125,64 +130,76 @@ def rotate_script(wallpaper: dict[str, Any]) -> str:
         if len(images) < 2:
             return ""
         payload = ",".join(f'"{u}"' for u in images)
-        body = f"""
-(function(){{
-  var list=[{payload}], i=0, body=document.body;
-  body.style.transition='background-image .8s ease-in-out';
-  function apply(){{
-    body.style.backgroundImage="url('"+list[i]+"')";
-    i=(i+1)%list.length;
-  }}
-  apply();
-  if(window.__rhWpTimer) clearInterval(window.__rhWpTimer);
-  window.__rhWpTimer=setInterval(apply,{seconds});
-}})();
-"""
+        js = (
+            "(function(){"
+            f"var list=[{payload}],i=0,body=document.body;"
+            "body.style.transition='background-image .8s ease-in-out';"
+            "function apply(){body.style.backgroundImage=\"url('\"+list[i]+\"')\";"
+            "i=(i+1)%list.length;}"
+            "apply();"
+            "if(window.__rhWpTimer){clearInterval(window.__rhWpTimer);}"
+            f"window.__rhWpTimer=setInterval(apply,{seconds});"
+            "})();"
+        )
     else:
-        # 走本站代理：上游 Key 只存在于服务端，浏览器拿不到
-        body = f"""
-(function(){{
-  var url="/panel/wallpaper", body=document.body;
-  body.style.transition='background-image .8s ease-in-out';
-  function apply(u){{
-    if(!/^https:\\/\\//i.test(u)) return;
-    body.style.backgroundImage="url('"+u+"')";
-  }}
-  function tick(){{
-    fetch(url,{{cache:'no-store',credentials:'omit'}})
-      .then(function(r){{return r.text();}})
-      .then(function(t){{
-        try{{ var j=JSON.parse(t); apply(String(j.url||j.image||"")); }}
-        catch(e){{ apply(String(t).trim()); }}
-      }})
-      .catch(function(){{}});
-  }}
-  tick();
-  if(window.__rhWpTimer) clearInterval(window.__rhWpTimer);
-  window.__rhWpTimer=setInterval(tick,{seconds});
-}})();
-"""
-    return f"<script>{body}</script>"
+        js = (
+            "(function(){"
+            "var url='/panel/wallpaper',body=document.body;"
+            "body.style.transition='background-image .8s ease-in-out';"
+            "function apply(u){"
+            r"if(!/^https?:\/\//i.test(u)){return;}"
+            "body.style.backgroundImage=\"url('\"+u+\"')\";}"
+            "function tick(){"
+            "fetch(url,{cache:'no-store',credentials:'omit'})"
+            ".then(function(r){return r.json();})"
+            ".then(function(j){apply(String((j&&j.url)||''));})"
+            ".catch(function(){});}"
+            "tick();"
+            "if(window.__rhWpTimer){clearInterval(window.__rhWpTimer);}"
+            f"window.__rhWpTimer=setInterval(tick,{seconds});"
+            "})();"
+        )
+    return "<script>" + js + "</script>"
 
-def pick_url(raw: str) -> str:
+
+def pick_url(raw: str, allow_http: bool = False) -> str:
     """从壁纸接口的响应里取 URL：支持 {"url": …} / {"image": …} / 纯文本。"""
     import json as _json
 
     text = (raw or "").strip()
     if not text:
         return ""
-    candidate = ""
     try:
         payload = _json.loads(text)
     except ValueError:
-        candidate = text
+        return clean_api_url(text, allow_http=allow_http)
+    if isinstance(payload, dict):
+        candidate = str(payload.get("url") or payload.get("image") or "")
+    elif isinstance(payload, list) and payload:
+        first = payload[0]
+        candidate = str(first.get("url") or "") if isinstance(first, dict) else str(first)
     else:
-        if isinstance(payload, dict):
-            candidate = str(payload.get("url") or payload.get("image") or "")
-        elif isinstance(payload, list) and payload:
-            first = payload[0]
-            candidate = str(first.get("url") or first) if isinstance(first, dict) else str(first)
-        else:
-            candidate = str(payload)
-    url = clean_api_url(candidate)
-    return url
+        candidate = str(payload)
+    return clean_api_url(candidate, allow_http=allow_http)
+
+
+def body_css(config: dict[str, Any] | None) -> str:
+    """给 body 用的背景声明（管理面与控制台共用同一份配置）。"""
+    wp = normalize(config)
+    fit = str((config or {}).get("bg_fit") or "cover").strip().lower()
+    if fit not in ("cover", "contain"):
+        fit = "cover"
+    color = str((config or {}).get("bg_color") or "")
+    css = ""
+    import re as _re
+    if _re.fullmatch(r"#[0-9a-fA-F]{3,8}", color):
+        css += f"background-color:{color};"
+    image = wp["images"][0] if wp["images"] else ""
+    if image:
+        css += f"background-image:url('{image}');"
+    if wp["mode"] != "static" or image:
+        css += (
+            f"background-size:{fit};background-repeat:no-repeat;"
+            "background-attachment:fixed;background-position:center;"
+        )
+    return css

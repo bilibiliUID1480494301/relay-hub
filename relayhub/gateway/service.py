@@ -35,6 +35,7 @@ from . import e2e as e2e_module
 from . import mcp as mcp_module
 from . import clients as clients_module
 from . import pluginlogs
+from . import landing as landing_module
 from . import reqlog
 from . import wallpaper as wallpaper_module
 from . import features as features_module
@@ -831,10 +832,18 @@ def _fetch_wallpaper_url() -> str:
     try:
         request = urllib.request.Request(api, headers=headers, method="GET")
         with urllib.request.urlopen(request, timeout=6) as response:
+            ctype = (response.headers.get("content-type") or "").lower()
+            final = response.geturl()
+            # 302 直接重定向到图片：最终地址就是壁纸，不用读正文
+            if ctype.startswith("image/"):
+                url = wallpaper_module.clean_image(final) if final.startswith("http") else ""
+                if url:
+                    _WALLPAPER_CACHE[api] = (now, url)
+                return url
             raw = response.read(4096).decode("utf-8", "replace")
     except Exception:  # noqa: BLE001 - 取不到就安静降级，不把上游错误带给浏览器
         return cached[1] if cached else ""
-    url = wallpaper_module.pick_url(raw)
+    url = wallpaper_module.pick_url(raw, allow_http=bool(wp.get("allow_http")))
     if url:
         _WALLPAPER_CACHE[api] = (now, url)
     return url
@@ -843,47 +852,59 @@ def _fetch_wallpaper_url() -> str:
 def _panel_bg_css() -> str:
     """从 webui.json 读外观配置，生成 body 背景 CSS。
 
-    配置在管理台写入时已按白名单校验过，这里**再**校验一遍：面板是公网面，
-    webui.json 落盘后可能被人手改过——读侧不信任写侧是老规矩。文件缺失、
-    损坏、字段不合法一律回默认米白底（展示偏好，坏一点不值得 500）。
+    尺寸规则常驻（contain + 居中 + 不重复）：API 模式下图片由 JS 在运行时设置，
+    若这里不给尺寸，浏览器会按默认 repeat 平铺，比例全乱。
     """
     try:
         cfg = json.loads(paths.webui_theme_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return _DEFAULT_BG
     color = str(cfg.get("bg_color") or "")
-    image = str(cfg.get("bg_image") or "")
+    wp = wallpaper_module.normalize(cfg)
     css = ""
     if re.fullmatch(r"#[0-9a-fA-F]{3,8}", color):
         css += f"background-color:{color};"
-    if image.startswith(("http://", "https://")) and not any(
-        c in image for c in " \t\r\n\"'<>\\()"
-    ):
+    image = wp["images"][0] if wp["images"] else ""
+    fit = str(cfg.get("bg_fit") or "cover").strip().lower()
+    if fit not in ("cover", "contain"):
+        fit = "cover"
+    if wp["mode"] != "static" or image:
         css += (
-            f"background-image:url('{image}');"
-            "background-size:cover;background-attachment:fixed;background-position:center;"
+            f"background-size:{fit};background-repeat:no-repeat;"
+            "background-attachment:fixed;background-position:center;"
         )
+    if image:
+        css += f"background-image:url('{image}');"
     return css or _DEFAULT_BG
 
 
+_BLUR_LAYER_CSS = (
+    "body::before{content:\"\";position:fixed;inset:-40px;z-index:-1;pointer-events:none;"
+    "background-image:inherit;background-size:cover;background-position:center;"
+    "filter:blur(28px) saturate(1.15) brightness(.62);transform:scale(1.06);}"
+)
+
+
+def _panel_wallpaper() -> dict:
+    """读一次 webui.json 并归一化（渲染层唯一入口）。"""
+    try:
+        cfg = json.loads(paths.webui_theme_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return wallpaper_module.normalize({})
+    return wallpaper_module.normalize(cfg)
+
+
 def _apply_panel_theme(html: str) -> str:
-    """把背景 CSS 与壁纸轮换脚本注入面板模板。"""
-    html = html.replace("__THEME_BG__", _panel_bg_css(), 1)
+    """把背景 CSS 与壁纸脚本注入面板模板（不铺伪元素层：它会盖住内容）。"""
+    bg = _panel_bg_css()
     script = wallpaper_module.rotate_script(_panel_wallpaper())
+    html = html.replace("__THEME_BG__", bg, 1)
     if script:
         if "__THEME_JS__" in html:
             html = html.replace("__THEME_JS__", script, 1)
         else:
             html = html.replace("</body>", script + "</body>", 1)
     return html
-
-
-def _panel_wallpaper() -> dict:
-    try:
-        cfg = json.loads(paths.webui_theme_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return wallpaper_module.normalize({})
-    return wallpaper_module.normalize(cfg)
 
 
 def _theme_vars(config) -> str:
@@ -911,7 +932,7 @@ fetch('/public/announcements').then(function(r){return r.json();}).then(function
 }).catch(function(){});
 </script>"""
 
-PANEL_HTML = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+PANEL_HTML = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23185FA5'/%3E%3Cpath d='M9 23V9h5l9 9v5h-5l-9-9v9z' fill='%23fff'/%3E%3C/svg%3E">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__SITE__ 用户面板</title>
 <style>
@@ -976,7 +997,7 @@ function renderAuth(showRegister){
   window.__reg=showRegister;
   document.getElementById('p').onkeydown=function(ev){if(ev.key==='Enter'){showRegister?doRegister():doLogin();}};
 }
-async function doLogin(){err('');var j=await api('/api/auth/login',{u:document.getElementById('u').value.trim(),p:document.getElementById('p').value});
+async function doLogin(){err('');var j=await api('/api/auth/login',{username:document.getElementById('u').value.trim(),password:document.getElementById('p').value});
   if(!j.ok){err(j.error);if(j.error&&(j.error.indexOf('不存在')>=0)&&window.__reg){err(j.error+'（可切换注册）');}return;}
   refresh();}
 async function doRegister(){err('');var j=await api('/api/auth/register',{username:document.getElementById('u').value.trim(),password:document.getElementById('p').value});
@@ -986,7 +1007,8 @@ async function doRegister(){err('');var j=await api('/api/auth/register',{userna
 var base='';
 var BG_KEY='relayhub_panel_bg';
 function applyBg(c){
-  if(c){document.body.style.background=c;}else{document.body.style.background='';}
+  // 只改颜色，不用 background 简写——简写会把壁纸的 background-image 一起清掉
+  if(c){document.body.style.backgroundColor=c;}else{document.body.style.backgroundColor='';}
   try{
     if(c){localStorage.setItem(BG_KEY,c);}else{localStorage.removeItem(BG_KEY);}
   }catch(e){/* 隐私模式存不了就算了，本次会话仍然生效 */}
@@ -999,10 +1021,10 @@ function bgBlock(){
   var colors=['#F7F6F3','#EAF1F8','#EAF5EE','#F5EEE2','#F2ECF5'];
   var dots=colors.map(function(c){
     return '<button class="swatch" data-c="'+c+'" style="background:'+c+
-      '" onclick="applyBg(''+c+'')" title="'+c+'"></button>';
+      '" onclick="applyBg(\\''+c+'\\')" title="'+c+'"></button>';
   }).join('');
   return '<h3>背景</h3><div class="swatches">'+dots+
-    '<button class="swatch-reset" onclick="applyBg('')">重置</button></div>';
+    '<button class="swatch-reset" onclick="applyBg(\\'\\')">重置</button></div>';
 }
 (function(){try{applyBg(localStorage.getItem(BG_KEY));}catch(e){}})();
 function esc(s){var d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
@@ -1031,7 +1053,7 @@ function renderAuth(showRegister){
   window.__reg=showRegister;
   document.getElementById('p').onkeydown=function(ev){if(ev.key==='Enter'){showRegister?doRegister():doLogin();}};
 }
-async function doLogin(){err('');var j=await api('/api/auth/login',{u:document.getElementById('u').value.trim(),p:document.getElementById('p').value});
+async function doLogin(){err('');var j=await api('/api/auth/login',{username:document.getElementById('u').value.trim(),password:document.getElementById('p').value});
   if(!j.ok){err(j.error);if(j.error&&(j.error.indexOf('不存在')>=0)&&window.__reg){err(j.error+'（可切换注册）');}return;}
   refresh();}
 async function doRegister(){err('');var j=await api('/api/auth/register',{username:document.getElementById('u').value.trim(),password:document.getElementById('p').value});
@@ -1398,15 +1420,16 @@ class RelayHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/auth/login":
                 body = self._read_json() or {}
-                user = self.users.verify(
-                    str(body.get("username") or ""), str(body.get("password") or "")
-                )
+                # 兼容两种字段名：面板历史上传 u/p，注册与 API 用 username/password
+                account = str(body.get("username") or body.get("u") or "")
+                secret = str(body.get("password") or body.get("p") or "")
+                user = self.users.verify(account, secret)
                 if user is None:
                     # 登录失败也留痕（含 IP）：撞库/爆破在这里能看出来
                     audit_module.record(
                         "panel.login_failed",
                         path=paths.audit_path(),
-                        username=str(body.get("username") or "")[:32],
+                        username=str(body.get("username") or body.get("u") or "")[:32],
                         ip=self.client_address[0],
                     )
                     self._send_json(401, {"ok": False, "error": "用户名或密码错误"})
@@ -2078,28 +2101,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._panel_wallpaper_json()
             return
         if path == "/":
-            # 落地页：给「在浏览器里打开域名看一眼」的人一个明确的回应。
-            # 刻意不含模型清单与任何凭证线索——那些都在鉴权之后。
-            self._send_html(
-                "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
-                "<title>__SITE__</title></head>"
-                "<body style=\"font-family:sans-serif;max-width:640px;margin:60px auto;"
-                "color:#333;line-height:1.7\">"
-                "<h2>__SITE__ 中转站在线</h2>"
-                "<p>这是一个 OpenAI / Anthropic / Gemini 兼容的 API 网关。</p>"
-                "<p><a href=\"/panel\">用户面板</a>（登录/注册/兑换额度/API Key）</p>"
-                "<p>可用端点（均需凭证）：</p>"
-                "<ul><li><code>GET /v1/models</code></li>"
-                "<li><code>POST /v1/chat/completions</code></li>"
-                "<li><code>POST /v1/messages</code></li>"
-                "<li><code>POST /v1/embeddings</code></li>"
-                "<li><code>POST /v1/responses</code></li>"
-                "<li><code>POST /v1beta/models/{model}:generateContent</code>（Gemini 原生，含 <code>:streamGenerateContent</code>）</li></ul>"
-                "<p>健康检查：<code>GET /healthz</code>（无需凭证，供 Docker/负载均衡探活）。</p>"
-                "<p style=\"color:#888\">凭证无效或缺失会返回 401；"
-                "超过限额返回 429。拿测试密钥做连通性检查是正常用法。</p>"
-                "</body></html>"
-            )
+            # 落地页与用户面板共用同一套外观（配色、卡片、壁纸、图标）
+            self._send_html(_apply_panel_theme(landing_module.LANDING_HTML))
             return
         if path == "/.well-known/agent.json":
             station = toip_module.load_station(paths.toip_station_path())
@@ -3086,7 +3089,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 fresh = self.users.pool.get(identity.user_id)
                 if fresh is not None:
                     if ok:
-                        cost = self.users.pool.cost_of(fresh, tokens_in, tokens_out, ts=started)
+                        cost = self.users.pool.cost_of(fresh, tokens_in, tokens_out, ts=started, cache_read=cache_read)
                         self.users.settle(identity.user_id, pre, cost)  # 多退少补
                     else:
                         # 流中断：上游已消费整段输入，按预扣额结清（不上浮也不退还）
@@ -3125,7 +3128,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         if identity is not None and identity.user_id and self.users:
             fresh = self.users.pool.get(identity.user_id)
             if fresh is not None:
-                cost = self.users.pool.cost_of(fresh, tokens_in, tokens_out, ts=started)
+                cost = self.users.pool.cost_of(fresh, tokens_in, tokens_out, ts=started, cache_read=cache_read)
                 self.users.settle(identity.user_id, pre, cost)  # 多退少补
         # 记账赶在写响应之前：响应字节一出去，客户端就可能立刻断开，
         # 账还没落盘就被读到旧值（测试里表现为偶发丢一次）。

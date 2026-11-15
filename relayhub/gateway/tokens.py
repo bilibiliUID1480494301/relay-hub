@@ -483,6 +483,37 @@ class TokenStore:
             self._pool.save(self.path)
             return ok, reason
 
+    def tokens_of(self, user_id: str) -> list[DownstreamToken]:
+        """某个用户名下的全部令牌（面板列表用）。"""
+        if not user_id:
+            return []
+        return [tok for tok in self._current().tokens if tok.user_id == user_id]
+
+    def add_for_user(self, user_id: str, name: str, **fields) -> DownstreamToken:
+        """给用户再发一枚令牌。**不删旧的**——多设备各用各的，泄露只吊销一把。"""
+        if not user_id:
+            raise TokenError("必须指定 user_id")
+        tok = DownstreamToken(user_id=user_id, name=name, **fields)
+        self.mutate(lambda pool: pool.add(tok))
+        return tok
+
+    def revoke_for_user(self, user_id: str, identifier: str) -> bool:
+        """吊销**自己**的某一枚。别人的令牌一律删不到（越权防护在这里，不在调用方）。"""
+        targets = {tok.token_id for tok in self.tokens_of(user_id)}
+        targets |= {tok.name for tok in self.tokens_of(user_id)}
+        if identifier not in targets:
+            return False
+        ok = False
+
+        def _drop(pool):
+            nonlocal ok
+            before = len(pool.tokens)
+            pool.remove(identifier)
+            ok = len(pool.tokens) < before
+
+        self.mutate(_drop)
+        return ok
+
     def mutate(self, change) -> None:
         """锁内对内存池做任意修改再落盘（change(pool) 抛异常则不落盘）。
 

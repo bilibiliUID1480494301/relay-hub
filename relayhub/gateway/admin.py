@@ -38,6 +38,7 @@ from .. import __version__ as relayhub_version
 from .. import __version__ as _version
 from . import migrate as migrate_module
 from . import users as user_module
+from . import timerules as timerules_module
 from . import wallpaper as wallpaper_module
 from . import tokens as token_module
 from . import persist as persist_module
@@ -259,8 +260,18 @@ def _apply_user_settings(
     groups=None,
     peak_hours=None,
     peak_multiplier=None,
+    timezone=None,
+    per_call=None,
+    time_rules=None,
 ) -> None:
     """计费规则/注册开关的 PUT 应用。None = 不改。"""
+    if time_rules is not None:
+        pool.time_rules_raw = list(time_rules)
+        pool.time_rules = timerules_module.compile_rules(pool.time_rules_raw)
+    if timezone is not None:
+        pool.timezone = str(timezone).strip() or "Asia/Shanghai"
+    if per_call is not None:
+        pool.per_call = max(0.0, float(per_call))
     if allow_register is not None:
         pool.allow_register = bool(allow_register)
     if default_quota is not None:
@@ -322,6 +333,20 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def _send_html(self, html: str) -> None:
         html = site_module.render(html, self._site_name())
+        # 管理面也吃同一份壁纸配置：内容区加半透明白底，保证表格可读
+        try:
+            cfg = json.loads(paths.webui_theme_path().read_text(encoding="utf-8"))
+            bg = wallpaper_module.body_css(cfg)
+        except (OSError, ValueError):
+            bg = ""
+        if bg:
+            html = html.replace(
+                "</head>",
+                "<style id=\"rh-wallpaper\">body{" + bg + "}"
+                ".wrap{background:rgba(255,255,255,.84);border-radius:16px;"
+                "padding:18px 20px;box-shadow:0 8px 30px rgba(38,33,92,.10)}</style></head>",
+                1,
+            )
         raw = html.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1094,6 +1119,10 @@ class AdminHandler(BaseHTTPRequestHandler):
             "allow_register": pool.allow_register,
             "default_quota": pool.default_quota,
             "price_in_per_1k": pool.price_in_per_1k,
+            "timezone": pool.timezone,
+            "per_call": pool.per_call,
+            "cache_read_ratio": pool.cache_read_ratio,
+            "time_rules": pool.time_rules_raw,
             "price_out_per_1k": pool.price_out_per_1k,
             "groups": pool.groups,
             "peak_hours": sorted(getattr(pool, "peak_hours", set()) or set()),
@@ -1164,6 +1193,9 @@ class AdminHandler(BaseHTTPRequestHandler):
                         groups=body.get("groups"),
                         peak_hours=body.get("peak_hours"),
                         peak_multiplier=body.get("peak_multiplier"),
+                        timezone=body.get("timezone"),
+                        per_call=body.get("per_call"),
+                        time_rules=body.get("time_rules"),
                     )
                 )
                 self._send_json(200, self._users_state())
@@ -2130,7 +2162,11 @@ class AdminHandler(BaseHTTPRequestHandler):
             "bg_images": wallpaper_module.clean_images(raw.get("bg_images") or []),
             "bg_mode": str(raw.get("bg_mode") or "static"),
             "bg_rotate_seconds": wallpaper_module.clamp_seconds(raw.get("bg_rotate_seconds")),
-            "bg_api_url": wallpaper_module.clean_api_url(raw.get("bg_api_url") or ""),
+            "bg_api_url": wallpaper_module.clean_api_url(
+                raw.get("bg_api_url") or "", allow_http=bool(raw.get("bg_api_allow_http"))
+            ),
+            "bg_api_allow_http": bool(raw.get("bg_api_allow_http")),
+            "bg_fit": str(raw.get("bg_fit") or "cover"),
         }
 
     def _update_webui(self) -> None:
@@ -2150,7 +2186,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         if mode not in wallpaper_module.MODES:
             self._error(400, "壁纸模式只能是 static / rotate / api")
             return
-        api_url = wallpaper_module.clean_api_url(body.get("bg_api_url") or "")
+        allow_http = bool(body.get("bg_api_allow_http"))
+        api_url = wallpaper_module.clean_api_url(body.get("bg_api_url") or "", allow_http=allow_http)
         if str(body.get("bg_api_url") or "").strip() and not api_url:
             self._error(400, "壁纸 API 必须是 https 地址")
             return
@@ -2160,13 +2197,21 @@ class AdminHandler(BaseHTTPRequestHandler):
         if mode == "api" and not api_url:
             self._error(400, "API 模式必须填壁纸接口地址（https）")
             return
+        fit = str(body.get("bg_fit") or "cover").strip().lower()
+        if fit not in ("cover", "contain"):
+            self._error(400, "壁纸填充方式只能是 cover / contain")
+            return
         payload = {
             "bg_color": color,
+            "bg_fit": fit,
             "bg_image": image,
             "bg_images": images,
             "bg_mode": mode,
             "bg_rotate_seconds": wallpaper_module.clamp_seconds(body.get("bg_rotate_seconds")),
             "bg_api_url": api_url,
+            "bg_api_allow_http": allow_http,
+            "bg_api_key": wallpaper_module.clean_api_key(body.get("bg_api_key") or ""),
+            "bg_api_header": str(body.get("bg_api_header") or "Authorization").strip() or "Authorization",
             "updated_at": round(time.time(), 3),
         }
         atomicio.write_json_atomic(paths.webui_theme_path(), payload)
@@ -2791,7 +2836,7 @@ display:none;border:1px solid var(--line);background:var(--panel)}
 <div class="pane" id="pane-newapi" style="display:none">
 <section class="panel">
   <h2>new-api 账单</h2>
-  <p class="hint">查上游 / 同学 new-api 站点的真实余额与单价。密钥只用于本次查询，不落盘、不进审计。</p>
+  <p class="hint">查上游 / 第三方 new-api 站点的真实余额与单价。密钥只用于本次查询，不落盘、不进审计。</p>
   <div class="row">
     <label>站点地址 <input id="na-base" placeholder="https://example.com" style="min-width:240px"></label>
     <label>API Key <input id="na-key" type="password" placeholder="sk-..." style="min-width:200px"></label>
@@ -3974,7 +4019,7 @@ switchTab('clients');
     "确认写入？同名用户与同哈希令牌会被跳过，现有账号不会被覆盖。":
       "Write now? Same-name users and same-hash tokens are skipped; existing accounts are never overwritten.",
     "导出用户、令牌（仅哈希）与站点设置。默认不含上游 Key；要带密钥必须填口令，导出的是加密块。导入默认只预演，确认后再写入。":
-      "Exports users, token hashes and site settings. Upstream keys are excluded by default; including them requires a passphrase and yields an encrypted blob. Import dry-runs first."
+      "Exports users, token hashes and site settings. Upstream keys are excluded by default; including them requires a passphrase and yields an encrypted blob. Import dry-runs first.",
     "显示在用户面板、落地页与管理面的标题上；留空恢复默认 relay-hub。":"Shown as the title on the user panel, landing page and admin console; leave blank to restore the default relay-hub."
   };
   var en = localStorage.getItem('rh_lang') === 'en', btn;
