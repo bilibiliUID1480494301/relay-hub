@@ -170,3 +170,30 @@ def test_agent_card_version_follows_package(tmp_path: Path) -> None:
 
     card = agent_card(tmp_path / "a2a.json", "st-name", "http://127.0.0.1:8799")
     assert card["version"] == __version__
+
+
+def test_rejected_requests_do_not_reset_the_connection(tmp_path: Path) -> None:
+    """未鉴权 POST 必须稳定拿到 401，不能偶发 ConnectionAbortedError。
+
+    根因：服务端在读完请求体之前就回 401 并 close（客户端默认带
+    Connection: close），接收缓冲区里残留数据会让 Windows 发 RST 而不是 FIN，
+    客户端于是读不到响应。修复前实测 600 次挂 25 次（4.2%）。
+    """
+    import urllib.error
+
+    with a2a_downstream() as url:
+        with relay_with_a2a(tmp_path, url) as base:
+            failures = []
+            for _ in range(100):
+                try:
+                    status, _reply = _rpc(
+                        base,
+                        {"jsonrpc": "2.0", "id": 1, "method": "message/send",
+                         "params": {"agent": "peer"}},
+                        credential=None,
+                    )
+                    if status != 401:
+                        failures.append(f"status={status}")
+                except (urllib.error.URLError, ConnectionError, OSError) as exc:
+                    failures.append(f"{type(exc).__name__}: {exc}")
+            assert not failures, f"{len(failures)}/100 次没拿到干净的 401：{failures[:3]}"

@@ -55,6 +55,10 @@ from .users import can as user_can
 
 ANTHROPIC_VERSION = "2023-06-01"
 
+# 回错误响应前愿意读掉多少未读请求体。超出的直接放弃（大包体被拒时
+# 宁可让客户端看到一次 RST，也不为了一个 401 去读 10MB）。
+MAX_DRAIN_BODY = 1 << 20
+
 
 class ChannelError(RuntimeError):
     """演示用渠道故障（真实上游错误见 upstream.UpstreamError）。"""
@@ -1271,6 +1275,9 @@ class RelayHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: int, payload: dict[str, Any], cookie: str | None = None,
                    cookie_max_age: int = 0) -> None:
+        # 响应前先把请求体读干净：客户端多半带 Connection: close，
+        # 缓冲区里残留未读数据会让关闭变成 RST，401 会被客户端读丢。
+        self._drain_request_body()
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self._echo_request_id()
@@ -2059,7 +2066,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         except ValueError:
             self._error(400, "Content-Length 非法", dialect=dialect)
             return None
-        raw = self.rfile.read(length) if length else b""
+        raw = self._read_body_bytes(length)
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         if ctype == e2e_module.ENVELOPE_CONTENT_TYPE:
             return self._open_envelope(raw, dialect)
@@ -2142,7 +2149,37 @@ class RelayHandler(BaseHTTPRequestHandler):
         """
         request_id = (self.headers.get("X-Request-ID") or uuid.uuid4().hex)[:64]
         self._current_request_id = request_id
+        try:
+            self._body_len = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._body_len = 0
+        self._body_read = 0
         return request_id
+
+    def _read_body_bytes(self, length: int) -> bytes:
+        """读请求体，并记账已读字节——回错误响应时要知道还剩多少没读。"""
+        if length <= 0:
+            return b""
+        raw = self.rfile.read(length)
+        self._body_read = getattr(self, "_body_read", 0) + len(raw)
+        return raw
+
+    def _drain_request_body(self) -> None:
+        """把没读完的请求体读掉再回响应。
+
+        为什么必须：客户端（urllib / requests）默认带 `Connection: close`，
+        服务端读完响应就 close()。此时接收缓冲区里还压着没读完的请求体，
+        Windows 发的是 **RST 而不是 FIN**，客户端于是偶尔读不到那个 401/403，
+        只看到 `ConnectionAbortedError`——实测未鉴权 POST 600 次里挂 25 次
+        （4.2%），表现成「像网络抖动」的随机失败。
+        """
+        remaining = getattr(self, "_body_len", 0) - getattr(self, "_body_read", 0)
+        if remaining <= 0 or remaining > MAX_DRAIN_BODY:
+            return
+        try:
+            self._read_body_bytes(remaining)
+        except OSError:
+            pass
 
     def do_GET(self) -> None:  # noqa: N802
         self._begin_request()
@@ -2819,7 +2856,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         except ValueError:
             self._error(400, "Content-Length 非法", dialect=dialect)
             return
-        raw_body = self.rfile.read(length) if length else b""
+        raw_body = self._read_body_bytes(length)
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         request: dict[str, Any]
         if ctype == e2e_module.ENVELOPE_CONTENT_TYPE:
@@ -2890,7 +2927,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         except ValueError:
             self._error(400, "Content-Length 非法", dialect=dialect)
             return
-        raw_body = self.rfile.read(length) if length else b""
+        raw_body = self._read_body_bytes(length)
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         request: dict[str, Any]
         if ctype == e2e_module.ENVELOPE_CONTENT_TYPE:
