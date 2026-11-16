@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -172,19 +173,32 @@ def test_agent_card_version_follows_package(tmp_path: Path) -> None:
     assert card["version"] == __version__
 
 
-def test_rejected_requests_do_not_reset_the_connection(tmp_path: Path) -> None:
-    """未鉴权 POST 必须稳定拿到 401，不能偶发 ConnectionAbortedError。
+def _wait_unread_counter(target: int, timeout: float = 3.0) -> int:
+    """等服务端线程把计数器加上去（响应返回时记账可能还没跑完）。"""
+    from relayhub.gateway.service import RelayHandler
 
-    根因：服务端在读完请求体之前就回 401 并 close（客户端默认带
-    Connection: close），接收缓冲区里残留数据会让 Windows 发 RST 而不是 FIN，
-    客户端于是读不到响应。修复前实测 600 次挂 25 次（4.2%）。
+    deadline = time.time() + timeout
+    while time.time() < deadline and RelayHandler.unread_body_closes < target:
+        time.sleep(0.02)
+    return RelayHandler.unread_body_closes
+
+
+def test_unread_body_counter_catches_the_bug(tmp_path: Path, monkeypatch) -> None:
+    """关掉 drain 后，计数器必须抓到「请求体没读完」——证明这条不变量是活的。
+
+    这是确定性判定：不依赖 RST 的概率复现。根因是鉴权先于读体，
+    拒绝时请求体还压在接收缓冲区里，close 就会被 Windows 变成 RST，
+    客户端偶发 ConnectionAbortedError（实测未鉴权 POST 600 次挂 50 次）。
     """
-    import urllib.error
+    from relayhub.gateway.service import RelayHandler
 
+    monkeypatch.setattr(RelayHandler, "unread_body_closes", 0)
+    monkeypatch.setattr(RelayHandler, "_drain_request_body", lambda self: None)
+
+    aborted = 0
     with a2a_downstream() as url:
         with relay_with_a2a(tmp_path, url) as base:
-            failures = []
-            for _ in range(100):
+            for _ in range(3):
                 try:
                     status, _reply = _rpc(
                         base,
@@ -192,8 +206,43 @@ def test_rejected_requests_do_not_reset_the_connection(tmp_path: Path) -> None:
                          "params": {"agent": "peer"}},
                         credential=None,
                     )
-                    if status != 401:
-                        failures.append(f"status={status}")
-                except (urllib.error.URLError, ConnectionError, OSError) as exc:
-                    failures.append(f"{type(exc).__name__}: {exc}")
-            assert not failures, f"{len(failures)}/100 次没拿到干净的 401：{failures[:3]}"
+                    assert status == 401
+                except OSError:
+                    # 正是这个缺陷的表现：客户端没读到 401，只看到连接被中止
+                    aborted += 1
+
+    # 三次请求都应留下未读请求体；读数与客户端有没有被中止无关
+    assert _wait_unread_counter(3) == 3, (
+        f"计数器只记到 {_wait_unread_counter(0, 0)}/3 次：不变量本身失效了（客户端被中止 {aborted} 次）"
+    )
+
+
+def test_rejections_leave_no_unread_body(tmp_path: Path, monkeypatch) -> None:
+    """拒绝路径（401 / 404 / 400）都必须把请求体读干净，否则关连接会变 RST。"""
+    from relayhub.gateway.service import RelayHandler
+
+    monkeypatch.setattr(RelayHandler, "unread_body_closes", 0)
+
+    with a2a_downstream() as url:
+        with relay_with_a2a(tmp_path, url) as base:
+            # 未鉴权
+            assert _rpc(base, {"jsonrpc": "2.0", "id": 1, "method": "message/send",
+                               "params": {"agent": "peer"}}, credential=None)[0] == 401
+            # 鉴权通过但请求体不是合法 JSON
+            bad = urllib.request.Request(f"{base}/a2a", data=b"{not json",
+                                         method="POST")
+            bad.add_header("Content-Type", "application/json")
+            bad.add_header("x-api-key", API_KEY)
+            try:
+                urllib.request.urlopen(bad, timeout=10).read()
+            except urllib.error.HTTPError as exc:
+                exc.read()
+            # 未知路径
+            miss = urllib.request.Request(f"{base}/nope", data=b'{"x":1}', method="POST")
+            miss.add_header("Content-Type", "application/json")
+            try:
+                urllib.request.urlopen(miss, timeout=10).read()
+            except urllib.error.HTTPError as exc:
+                exc.read()
+
+    assert _wait_unread_counter(0, timeout=0.3) == 0, "有请求体没读完就关连接，客户端会读不到响应"

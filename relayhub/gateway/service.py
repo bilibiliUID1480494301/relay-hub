@@ -1168,6 +1168,10 @@ refresh();
 
 class RelayHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # 结构不变量计数器：请求结束时请求体还没读完的次数。
+    # 正常情况下恒为 0（拒绝路径也会先 drain）；>0 说明关连接时会变 RST，
+    # 客户端可能读不到那个 401/403。测试用它做确定性判定，不靠概率复现。
+    unread_body_closes = 0
     # Server 响应头里的版本号。早先写死 "relayhub/0.2"——排查时永远不知道
     # 对面跑的是哪一版，只好去问部署的人。改成跟随包版本单一来源
     # （与 /health、agent card 同一份），别在这里再抄一个数字。
@@ -2059,6 +2063,19 @@ class RelayHandler(BaseHTTPRequestHandler):
         except OSError as exc:
             # 记账失败不该弄死正在返回的响应，但必须留痕
             self.log_error("令牌用量落盘失败：%r", exc)
+
+    def handle_one_request(self) -> None:
+        """每个请求收尾核对结构不变量：请求体不许有剩余。
+
+        没读完就关连接，Windows 会把这次关闭变成 RST，客户端可能读不到响应。
+        计数器只给测试和排障用，不参与请求处理。
+        """
+        try:
+            super().handle_one_request()
+        finally:
+            remaining = getattr(self, "_body_len", 0) - getattr(self, "_body_read", 0)
+            if remaining > 0:
+                type(self).unread_body_closes += 1
 
     def _read_json(self, dialect: str = "anthropic") -> dict[str, Any] | None:
         try:
