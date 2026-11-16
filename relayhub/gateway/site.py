@@ -34,6 +34,7 @@ class SiteConfig:
     announcement_until: int = 0
     announcement_level: str = "info"   # info | warning | critical
     announcement_public: bool = False  # 是否允许未认证访问（走 /public/announcements）
+    announcement_pinned: bool = False  # 置顶：面板里不可关闭，且排在最前
     # 主题：只收颜色（#rgb/#rrggbb）与可选 Logo URL，**不收整段 CSS**（那就是存储型 XSS）
     theme_primary: str = ""
     theme_bg: str = ""
@@ -89,6 +90,9 @@ def load_site(path: Path) -> SiteConfig:
         announcement=sanitize_announcement(raw.get("announcement")),
         announcement_until=int(raw.get("announcement_until") or 0),
         announcement_level=level if level in ("info", "warning", "critical") else "info",
+        # 这两个布尔以前没读回来：重启后「公开公告」「置顶」都会丢
+        announcement_public=bool(raw.get("announcement_public")),
+        announcement_pinned=bool(raw.get("announcement_pinned")),
         theme_primary=sanitize_color(raw.get("theme_primary")),
         theme_bg=sanitize_color(raw.get("theme_bg")),
         theme_logo=sanitize_logo(raw.get("theme_logo")),
@@ -101,6 +105,7 @@ def save_site(
     announcement: object | None = None,
     announcement_until: object | None = None,
     announcement_level: object | None = None,
+    announcement_pinned: object | None = None,
     theme_primary: object | None = None,
     theme_bg: object | None = None,
     theme_logo: object | None = None,
@@ -122,6 +127,9 @@ def save_site(
             else max(0, int(announcement_until or 0))
         ),
         announcement_level=level if level in ("info", "warning", "critical") else "info",
+        announcement_pinned=(
+            current.announcement_pinned if announcement_pinned is None else bool(announcement_pinned)
+        ),
         theme_primary=current.theme_primary if theme_primary is None else sanitize_color(theme_primary),
         theme_bg=current.theme_bg if theme_bg is None else sanitize_color(theme_bg),
         theme_logo=current.theme_logo if theme_logo is None else sanitize_logo(theme_logo),
@@ -136,6 +144,7 @@ def save_site(
             "announcement_until": site.announcement_until,
             "announcement_level": site.announcement_level,
             "announcement_public": site.announcement_public,
+            "announcement_pinned": site.announcement_pinned,
             "theme_primary": site.theme_primary,
             "theme_bg": site.theme_bg,
             "theme_logo": site.theme_logo,

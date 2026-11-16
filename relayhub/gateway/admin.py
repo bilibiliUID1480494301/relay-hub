@@ -1611,6 +1611,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             announcement=str(body.get("text") or ""),
             announcement_until=int(body.get("until") or 0),
             announcement_level=str(body.get("level") or "info"),
+            announcement_pinned=bool(body.get("pinned")),
         )
         audit_module.record("site.announcement", path=self.server.audit_path)  # type: ignore[attr-defined]
         self._send_json(200, _announcement_payload())
@@ -2244,6 +2245,7 @@ def _announcement_payload() -> dict[str, Any]:
         "text": cfg.announcement if active else "",
         "level": cfg.announcement_level,
         "until": cfg.announcement_until,
+        "pinned": cfg.announcement_pinned,
     }
 
 
@@ -2687,6 +2689,20 @@ display:none;border:1px solid var(--line);background:var(--panel)}
 </section>
 
 <section class="panel">
+  <h2>全站公告</h2>
+  <p class="hint">显示在用户面板顶部。置顶时用户无法关闭，且不受「到期时间」影响。</p>
+  <label>正文（留空即清除）</label>
+  <textarea id="ann-text" rows="3" style="width:100%"></textarea>
+  <label>级别</label>
+  <select id="ann-level"><option value="info">提示</option><option value="warning">警告</option><option value="critical">严重</option></select>
+  <label>到期时间（留空 = 长期有效）</label>
+  <input id="ann-until" type="datetime-local">
+  <label><input id="ann-pinned" type="checkbox"> 置顶（不可关闭）</label>
+  <div class="row"><button onclick="saveAnnouncement()">发布 / 更新</button>
+  <button class="ghost" onclick="document.getElementById('ann-text').value='';saveAnnouncement();">清除公告</button></div>
+</section>
+
+<section class="panel">
   <h2>渠道</h2>
   <div style="overflow-x:auto"><table>
     <thead><tr><th>名称</th><th>协议</th><th>状态</th><th>模型</th><th>用量</th>
@@ -2989,6 +3005,34 @@ function api(method,path,body){
     });
   });
 }
+
+
+async function loadAnnouncement(){
+  try{
+    var d=await api('GET','/api/announcement');
+    document.getElementById('ann-text').value=d.text||'';
+    document.getElementById('ann-level').value=d.level||'info';
+    document.getElementById('ann-pinned').checked=!!d.pinned;
+    var u=document.getElementById('ann-until');
+    if(d.until){var dt=new Date(d.until*1000);dt.setMinutes(dt.getMinutes()-dt.getTimezoneOffset());
+      u.value=dt.toISOString().slice(0,16);}
+  }catch(e){}
+}
+async function saveAnnouncement(){
+  var untilEl=document.getElementById('ann-until').value;
+  var until=untilEl?Math.floor(new Date(untilEl).getTime()/1000):0;
+  try{
+    await api('POST','/api/announcement',{
+      text:document.getElementById('ann-text').value.trim(),
+      level:document.getElementById('ann-level').value,
+      until:until,
+      pinned:document.getElementById('ann-pinned').checked
+    });
+    toast('公告已保存');
+    loadAnnouncement();
+  }catch(e){ toast('保存失败：'+e.message); }
+}
+loadAnnouncement();
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
   return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}

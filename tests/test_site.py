@@ -46,3 +46,32 @@ def test_panel_render_injects_name() -> None:
     out = site.render(service_module.PANEL_HTML, "MyHub")
     assert "__SITE__" not in out
     assert "MyHub 用户面板" in out
+
+
+def test_announcement_pinned_round_trip(tmp_path):
+    """置顶标记必须落盘并读得回来——否则重启就没了。"""
+    from relayhub.gateway import site as site_mod
+
+    path = tmp_path / "site.json"
+    site_mod.save_site(path, "relay-hub", announcement="维护通知",
+                       announcement_level="warning", announcement_pinned=True)
+
+    again = site_mod.load_site(path)
+    assert again.announcement_pinned is True
+    assert again.announcement == "维护通知"
+    assert again.announcement_level == "warning"
+
+
+def test_announcement_pinned_kept_when_only_renaming(tmp_path):
+    """只改站点名时，置顶标记不能被清掉。"""
+    from relayhub.gateway import site as site_mod
+
+    path = tmp_path / "site.json"
+    site_mod.save_site(path, "before", announcement="x", announcement_pinned=True)
+    site_mod.save_site(path, "after")
+    assert site_mod.load_site(path).announcement_pinned is True
+
+def test_announcement_pinned_defaults_false(tmp_path):
+    from relayhub.gateway import site as site_mod
+
+    assert site_mod.load_site(tmp_path / "nope.json").announcement_pinned is False

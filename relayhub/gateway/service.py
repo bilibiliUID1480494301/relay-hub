@@ -925,7 +925,7 @@ fetch('/public/announcements').then(function(r){return r.json();}).then(function
   var a0=a.items[0];
   var colors={info:'#2563eb',warning:'#d97706',critical:'#dc2626'};
   var bar=document.createElement('div');
-  bar.textContent=a0.text;
+  bar.textContent=(a0.pinned?'【置顶】':'')+a0.text;
   bar.setAttribute('role','status');
   bar.style.cssText='position:fixed;top:0;left:0;right:0;z-index:9999;padding:10px 16px;'
     +'text-align:center;font-size:14px;line-height:1.4;color:#fff;background:'
@@ -2203,6 +2203,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 {
                     "text": config.announcement if active else "",
                     "level": config.announcement_level,
+                    "pinned": bool(getattr(config, "announcement_pinned", False)),
                     "until": config.announcement_until,
                 },
             )
