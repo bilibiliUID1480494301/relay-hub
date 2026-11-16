@@ -2248,6 +2248,8 @@ class RelayHandler(BaseHTTPRequestHandler):
                     "quota": fresh.quota if fresh else 0,
                     "used": fresh.used if fresh else 0,
                     "group": fresh.group if fresh else "default",
+                    # 站点侧三级角色：user / vip / admin。控制台据此决定能做什么。
+                    "role": (fresh.role if fresh else user.role) or "user",
                     "allow_register": pool.allow_register,
                     "api_key_hint": api_key_hint,
                     "unlimited": bool(fresh and fresh.quota < 0),
