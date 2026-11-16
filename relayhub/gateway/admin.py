@@ -658,6 +658,12 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             self._events()
             return
+        if path == "/api/totp/recovery":
+            # handler 支持 GET（只报剩余数量），但 GET 分发原先没把这条路径接过来，
+            # 于是「查看剩余恢复码」永远 404——补在这里，别塞进 read_routes（那里
+            # 走 _send_json(200, fn())，而 _totp_recovery 自己写响应）。
+            self._handle("GET")
+            return
         read_routes = {
             "/api/clients": self._clients_state,
             "/api/tokens": self._tokens_state,
@@ -701,6 +707,26 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         self._handle("DELETE")
+
+    def _totp_recovery(self) -> None:
+        """恢复码：owner 才能生成；GET 只报剩余数量。"""
+        if self.role != "owner":
+            self._error(403, "只有站长可以管理恢复码")
+            return
+        store = self.server._recovery()  # type: ignore[attr-defined]
+        if self.command == "GET":
+            self._send_json(200, {"remaining": store.remaining()})
+            return
+        codes = store.regenerate()
+        audit_module.record(
+            "totp.recovery_generated", path=self.server.audit_path,  # type: ignore[attr-defined]
+            count=str(len(codes)),
+        )
+        self._send_json(200, {
+            "codes": codes,
+            "remaining": store.remaining(),
+            "note": "只显示这一次；旧码已全部作废。每个码只能用一次",
+        })
 
     def _handle(self, method: str) -> None:
         if not self._authorized():
@@ -2376,26 +2402,6 @@ class AdminServer(ThreadingHTTPServer):
 
     def _recovery(self) -> Any:
         return totpauth_module.Store(paths.recovery_path())
-
-    def _totp_recovery(self) -> None:
-        """恢复码：owner 才能生成；GET 只报剩余数量。"""
-        if self.role != "owner":
-            self._error(403, "只有站长可以管理恢复码")
-            return
-        store = self._recovery()
-        if self.command == "GET":
-            self._send_json(200, {"remaining": store.remaining()})
-            return
-        codes = store.regenerate()
-        audit_module.record(
-            "totp.recovery_generated", path=self.server.audit_path,  # type: ignore[attr-defined]
-            count=str(len(codes)),
-        )
-        self._send_json(200, {
-            "codes": codes,
-            "remaining": store.remaining(),
-            "note": "只显示这一次；旧码已全部作废。每个码只能用一次",
-        })
 
     def _totp_verify(self, code: str, *, window: int = 1) -> bool:
         import base64 as _b64
