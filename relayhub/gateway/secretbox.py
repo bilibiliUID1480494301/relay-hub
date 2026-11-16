@@ -27,6 +27,8 @@ import os
 import stat
 import sys
 from pathlib import Path
+
+from .atomicio import replace_with_retry
 from typing import Any
 
 SCHEME_DPAPI = "dpapi"
@@ -104,7 +106,7 @@ def seal(payload: dict[str, Any], *, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.seal.tmp")
     tmp.write_text(json.dumps(blob, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    replace_with_retry(tmp, path)
     harden(path)
 
 

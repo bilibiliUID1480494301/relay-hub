@@ -15,8 +15,27 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
+
+
+def replace_with_retry(src: Path, dst: Path, attempts: int = 6, backoff: float = 0.003) -> None:
+    """os.replace 带重试：Windows 上读者 open 与替换撞车会抛共享冲突（WinError 5）。
+
+    冲突窗口只有微秒级，但网关每个请求都在重写 tokens/pool，撞上一次就是一个 500
+    （`test_no_tear_reads_under_concurrent_writes` 在满载时约每三次复现一次：
+    写线程第一次 save 就撞上，直接退出）。等几毫秒就能过去；
+    真正不可恢复的（目录没了、只读）照样抛出去。
+    """
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(backoff * (attempt + 1))
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -32,7 +51,7 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         tmp.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
     finally:
         # replace 成功后 tmp 已不存在；写失败时清理，避免残留垃圾
         if tmp.exists():
