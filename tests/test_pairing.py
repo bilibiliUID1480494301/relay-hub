@@ -342,3 +342,26 @@ def test_code_mode_still_requires_pairing_code(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_window_write_is_atomic(tmp_path, monkeypatch) -> None:
+    """配对窗口文件必须原子写：发现应答器同时在轮询，半截 JSON 会被判成「窗口关闭」。"""
+    import os
+
+    from relayhub.gateway import atomicio
+
+    path = tmp_path / "pairing.json"
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky(a, b):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError(13, "拒绝访问")
+        return real_replace(a, b)
+
+    monkeypatch.setattr(atomicio.os, "replace", flaky)
+    open_window(path, client_id="c1")
+
+    assert calls["n"] >= 2, "窗口落盘没走带重试的原子替换"
+    assert pairing_module.window_open(path)

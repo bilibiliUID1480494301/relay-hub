@@ -45,6 +45,34 @@ def test_blocked_and_priority_are_mutually_exclusive(tmp_path) -> None:
     assert not store.is_ip_blocked("1.2.3.4")
 
 
+def test_save_survives_a_sharing_violation(tmp_path, monkeypatch) -> None:
+    """落盘必须是原子替换：Windows 上读者握着句柄时 os.replace 会抛 WinError 5。
+
+    策略文件在请求路径上按指纹热加载，非原子写会让读者读到半截 JSON，
+    _load 把它当成「无策略」→ 被拉黑的 IP 当场被放行。
+    """
+    import os
+
+    from relayhub.gateway import atomicio
+
+    path = tmp_path / "policy.json"
+    store = PolicyStore(path)
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky(a, b):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError(13, "拒绝访问")
+        return real_replace(a, b)
+
+    monkeypatch.setattr(atomicio.os, "replace", flaky)
+    store.set(KIND_IP, "9.9.9.9", blocked=True)
+
+    assert calls["n"] >= 2, "策略落盘没走带重试的原子替换"
+    assert PolicyStore(path).is_ip_blocked("9.9.9.9")
+
+
 def test_hot_reload_between_stores(tmp_path) -> None:
     """数据面与控制台各持一个实例：控制台改文件，数据面下一查即生效。"""
     path = tmp_path / "policy.json"

@@ -73,3 +73,30 @@ def test_announcement_roundtrip_and_expiry(tmp_path):
 
     again.announcement_until = int(time.time()) - 1
     assert site.announcement_active(again) is False
+
+
+def test_store_save_is_atomic(tmp_path, monkeypatch) -> None:
+    """指纹库落盘同样走原子替换：读半截会被当成「没有指纹」而误报全量变化。"""
+    import json
+    import os
+
+    from relayhub.gateway import atomicio
+
+    path = tmp_path / "fingerprints.json"
+    store = fp.Store(path)
+    store.record("k1", [{"id": "m1"}])
+
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky(a, b):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError(13, "拒绝访问")
+        return real_replace(a, b)
+
+    monkeypatch.setattr(atomicio.os, "replace", flaky)
+    store.save()
+
+    assert calls["n"] >= 2
+    assert json.loads(path.read_text(encoding="utf-8"))["k1"]["count"] == 1

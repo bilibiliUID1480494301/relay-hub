@@ -22,6 +22,7 @@ import hashlib
 import json
 
 from . import secretbox
+from .atomicio import write_json_atomic
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -102,9 +103,9 @@ class PolicyStore:
         }
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-            )
+            # 必须原子写：_refresh 在请求路径上按指纹热加载，半截文件会被
+            # _load 当成「无策略」→ 拉黑的 IP/设备当场被放行。
+            write_json_atomic(self.path, payload)
             self._fingerprint = _fingerprint(self.path)
         except OSError:
             # 写失败：内存策略仍在（本次进程继续生效），指纹不更新 →

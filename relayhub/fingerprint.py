@@ -18,6 +18,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from .gateway.atomicio import write_json_atomic
+
 UA = "relayhub-fingerprint"
 KEYS = ("id", "context_window", "max_output_tokens", "modalities", "ratio", "completion_ratio")
 
@@ -116,9 +118,7 @@ class Store:
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(self.state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
+        write_json_atomic(self.path, self.state)
 
 
 def scan(store: Store, targets: list[dict[str, str]], timeout: float = 12.0) -> list[dict[str, Any]]:

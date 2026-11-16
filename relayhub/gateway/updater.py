@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from . import signing
+from .atomicio import write_json_atomic
 from .signing_key import PUBLIC_KEY_B64
 
 UA = "relayhub-updater"
@@ -214,7 +215,7 @@ def record_install(store_dir: Path, version: str, wheel: Path, sha256: str) -> d
         shutil.copy2(wheel, kept)
     history.append({"version": version, "wheel": str(kept), "sha256": sha256, "at": int(time.time())})
     history = history[-5:]
-    history_path.write_text(json.dumps(history, ensure_ascii=False, indent=1), encoding="utf-8")
+    write_json_atomic(history_path, history)
     return {"kept": str(kept), "count": len(history)}
 
 

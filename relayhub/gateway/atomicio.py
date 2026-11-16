@@ -38,7 +38,7 @@ def replace_with_retry(src: Path, dst: Path, attempts: int = 6, backoff: float =
             time.sleep(backoff * (attempt + 1))
 
 
-def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+def write_json_atomic(path: Path, payload: Any) -> None:
     """JSON 原子落盘：先写同目录临时文件，再 os.replace 顶替正式文件。
 
     临时文件名带 pid + 线程 id：管理面与网关是两个进程，都可能保存同一份

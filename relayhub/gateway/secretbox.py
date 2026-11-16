@@ -105,8 +105,17 @@ def seal(payload: dict[str, Any], *, path: Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.seal.tmp")
-    tmp.write_text(json.dumps(blob, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    replace_with_retry(tmp, path)
+    try:
+        tmp.write_text(json.dumps(blob, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        replace_with_retry(tmp, path)
+    finally:
+        # 替换失败时别把 .seal.tmp 留在数据目录里：网关每请求都可能重写，
+        # 一旦持续失败就是按请求数累积垃圾文件。
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
     harden(path)
 
 

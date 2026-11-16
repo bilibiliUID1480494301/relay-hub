@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import audit
+from .atomicio import write_json_atomic
 from .tokens import TokenPool
 from .tokens import DownstreamToken, TokenStore, generate_token
 
@@ -73,7 +74,8 @@ def open_window(
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(window, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    # 原子写：发现应答器会同时轮询这个文件，半截 JSON 会让「窗口开着」判成关闭
+    write_json_atomic(path, window)
     audit.record("pair.begin", path=audit_path_of(path), client_id=client_id, ttl=ttl)
     return window
 
@@ -217,9 +219,7 @@ class PairingService:
         return _read_window(self.path)
 
     def _write_window(self, window: dict[str, Any]) -> None:
-        self.path.write_text(
-            json.dumps(window, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
+        write_json_atomic(self.path, window)
 
     def _remove_window(self) -> None:
         try:
