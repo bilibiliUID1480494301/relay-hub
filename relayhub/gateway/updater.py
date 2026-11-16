@@ -82,8 +82,12 @@ def stage(version: str, cache_dir: Path, timeout: float = 30.0, force: bool = Fa
     cache_dir.mkdir(parents=True, exist_ok=True)
     base = release_base(version)
     try:
-        manifest = _fetch(f"{base}/SHA256SUMS", cache_dir / f"SHA256SUMS-{version}", timeout).read_text(
-            encoding="utf-8"
+        # 显式按字节解码再归一：不依赖 read_text 的隐式换行翻译，
+        # 否则换个读法（newline="" / bytes）验签结论就变了。
+        manifest = signing.normalize_manifest(
+            _fetch(f"{base}/SHA256SUMS", cache_dir / f"SHA256SUMS-{version}", timeout)
+            .read_bytes()
+            .decode("utf-8")
         )
         signature = _fetch(f"{base}/SHA256SUMS.sig", cache_dir / f"SHA256SUMS-{version}.sig", timeout).read_text(
             encoding="utf-8"

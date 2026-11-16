@@ -43,12 +43,24 @@ def _ed25519_verify(public_key_b64: str, signature_b64: str, message: bytes) -> 
         raise VerifyError(f"签名校验异常：{type(exc).__name__}") from exc
 
 
+def normalize_manifest(text: str) -> str:
+    """把清单的行尾统一成 LF。
+
+    签名是**按字节**验的，而同一份清单在不同环节被打上 CRLF 太容易了
+    （`write_text` 在 Windows 上就会；HTTP 客户端也可能原样保留）。
+    行尾不是安全边界，但两侧必须用同一套归一规则，否则同一份清单
+    在两台机器上验签结论不同——0.12.16~0.12.30 的资产就是这么坏掉的。
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def verify_manifest(
     text: str, signature_b64: str, public_key_b64: str, expected_sha256: str
 ) -> str:
     """校验清单文本的签名，并确认目标文件的 sha256 在清单里。返回匹配到的哈希。"""
     if not signature_b64 or not public_key_b64:
         raise VerifyError("没有签名或公钥（发布方未签名）")
+    text = normalize_manifest(text)
     _ed25519_verify(public_key_b64, signature_b64, text.encode("utf-8"))
 
     wanted = expected_sha256.strip().lower()

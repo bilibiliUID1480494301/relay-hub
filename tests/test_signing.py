@@ -60,6 +60,58 @@ def test_hash_not_in_manifest_rejected(tmp_path):
         signing.verify_wheel(wheel, manifest, sig, pub)
 
 
+def test_crlf_manifest_still_verifies(tmp_path):
+    """清单被写成 CRLF 也要验得过：行尾不是安全边界，两侧归一规则一致即可。
+
+    0.12.16~0.12.30 的发布资产就是「签 LF、存 CRLF」——按原始字节验的
+    控制台全军覆没，靠 read_text 隐式归一的 Python 侧却侥幸通过。
+    """
+    private, pub = _keypair()
+    wheel = tmp_path / "w.whl"
+    wheel.write_bytes(b"payload")
+    digest = signing.sha256_of(wheel)
+    signed = f"{digest}  w.whl\n"
+    sig = base64.b64encode(private.sign(signed.encode())).decode()
+
+    assert signing.verify_wheel(wheel, signed.replace("\n", "\r\n"), sig, pub) == digest
+    assert signing.verify_wheel(wheel, signed.replace("\n", "\r"), sig, pub) == digest
+
+
+def test_sign_release_writes_the_bytes_it_signed(tmp_path):
+    """sign_release 必须把签的那串字节原样落盘——write_text 会偷偷把 \\n 改成 CRLF。"""
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "sign_release.py"
+    spec = importlib.util.spec_from_file_location("_sign_release", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+
+    private, pub = _keypair()
+    from cryptography.hazmat.primitives import serialization
+
+    key_path = tmp_path / "k.pem"
+    key_path.write_bytes(
+        private.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    wheel = dist / "hubrelay-0.0.1-py3-none-any.whl"
+    wheel.write_bytes(b"payload")
+
+    assert module.main([str(dist), "--key", str(key_path)]) == 0
+
+    raw = (dist / "SHA256SUMS").read_bytes()
+    assert b"\r" not in raw, "清单落盘不能带 CR，否则签名字节与文件字节不一致"
+    sig = base64.b64encode(private.sign(raw)).decode()  # 私钥签的就是落盘的字节
+    assert signing.verify_wheel(wheel, raw.decode(), sig, pub) == signing.sha256_of(wheel)
+
+
 def test_pinned_public_key_verifies_release_signature(tmp_path):
     """用仓库里写死的公钥验签：任何站长装的包都该能验同一份发布。"""
     from relayhub.gateway.signing_key import PUBLIC_KEY_B64

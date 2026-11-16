@@ -34,7 +34,8 @@ def main(argv: list[str]) -> int:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         lines.append(f"{digest}  {path.name}")
     manifest = "\n".join(lines) + "\n"
-    (dist / "SHA256SUMS").write_text(manifest, encoding="utf-8")
+    # 必须写 bytes：write_text 在 Windows 会改行尾，签名的字节就对不上了
+    (dist / "SHA256SUMS").write_bytes(manifest.encode("utf-8"))
 
     key = serialization.load_pem_private_key(Path(args.key).read_bytes(), password=None)
     signature = base64.b64encode(key.sign(manifest.encode("utf-8")))
