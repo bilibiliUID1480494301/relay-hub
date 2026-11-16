@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,9 @@ from . import signing
 from .signing_key import PUBLIC_KEY_B64
 
 UA = "relayhub-updater"
+REPO = "bilibiliUID1480494301/relay-hub"
+GITHUB_API = "https://api.github.com"
+PROBE_TIMEOUT = 8.0  # 清单探针的超时上限：直连被墙时别干等
 
 
 VERSION_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}$")
@@ -33,12 +37,21 @@ def check_version(version: str) -> str:
     return text
 
 
-def release_base(version: str, repo: str = "bilibiliUID1480494301/relay-hub") -> str:
+def release_base(version: str, repo: str = REPO) -> str:
     return f"https://github.com/{repo}/releases/download/v{version}"
 
 
 def wheel_name(version: str) -> str:
     return f"hubrelay-{version}-py3-none-any.whl"
+
+
+def _cache_name(name: str, version: str) -> str:
+    """落盘缓存名：清单带版本后缀防止多版本互相覆盖，wheel 保持原名（安装器按名找）。"""
+    if name == "SHA256SUMS":
+        return f"SHA256SUMS-{version}"
+    if name == "SHA256SUMS.sig":
+        return f"SHA256SUMS-{version}.sig"
+    return name
 
 
 def pick_wheel(manifest: str, version: str) -> tuple[str, str]:
@@ -51,11 +64,76 @@ def pick_wheel(manifest: str, version: str) -> tuple[str, str]:
     raise signing.VerifyError(f"签名清单里没有 {target}")
 
 
-def _fetch(url: str, dest: Path, timeout: float = 30.0) -> Path:
-    request = urllib.request.Request(url, headers={"User-Agent": UA})
+def _download(url: str, dest: Path, timeout: float = 30.0, accept: str | None = None) -> Path:
+    headers = {"User-Agent": UA}
+    if accept:
+        headers["Accept"] = accept
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         dest.write_bytes(response.read())
     return dest
+
+
+def _fetch(url: str, dest: Path, timeout: float = 30.0) -> Path:
+    return _download(url, dest, timeout)
+
+
+def _release_asset_index(repo: str, version: str, scratch: Path, timeout: float = 30.0) -> dict[str, str]:
+    """按 tag 取「资产名 → 下载直链」。
+
+    github.com:443 在部分地区会被整段封掉，api.github.com 通常仍然可通，
+    这条回落是给「站长在自己机器上一键升级」兜底的。
+    """
+    payload = json.loads(
+        _download(
+            f"{GITHUB_API}/repos/{repo}/releases/tags/v{version}",
+            scratch,
+            timeout,
+            accept="application/vnd.github+json",
+        ).read_bytes().decode("utf-8")
+    )
+    return {a["name"]: a["url"] for a in payload.get("assets", []) if a.get("name") and a.get("url")}
+
+
+def _fetch_asset(
+    name: str,
+    direct_url: str,
+    dest: Path,
+    timeout: float,
+    repo: str,
+    version: str,
+    state: dict[str, Any],
+    direct_timeout: float | None = None,
+) -> Path:
+    """先走 releases/download 直链；被挡时回落到 API 资产端点。
+
+    回落只换传输路径，**不换校验强度**：拿回来的字节照旧要过签名与 sha256。
+    一次直连失败就把 state["prefer_api"] 置位，后面几个资产别再挨个等超时
+    （否则升级流程会被 3 次 30 秒超时拖成一分半）。
+
+    `direct_timeout` 只作用于直连这一次尝试：拿清单当探针时给短超时，
+    但 API 回落仍用完整 `timeout`——那一段是真在传数据，压不得。
+    """
+    if not state.get("prefer_api"):
+        try:
+            return _download(direct_url, dest, direct_timeout or timeout)
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as direct_error:
+            state["prefer_api"] = True
+    else:
+        direct_error = urllib.error.URLError("直连不可用，走 API 回落")
+
+    try:
+        index = state.setdefault("index", {})
+        if not index:
+            index.update(
+                _release_asset_index(repo, version, dest.with_name(dest.name + ".assets.json"), timeout)
+            )
+        api_url = index.get(name)
+        if not api_url:
+            raise direct_error
+        return _download(api_url, dest, timeout, accept="application/octet-stream")
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError, ValueError, KeyError):
+        raise direct_error from None
 
 
 def verify_or_force(
@@ -75,25 +153,30 @@ def verify_or_force(
         return True, False, str(exc)
 
 
-def stage(version: str, cache_dir: Path, timeout: float = 30.0, force: bool = False) -> dict[str, Any]:
+def stage(
+    version: str, cache_dir: Path, timeout: float = 30.0, force: bool = False, repo: str = REPO
+) -> dict[str, Any]:
     """下载清单+签名+wheel 并验证。返回 {ok, wheel, sha256, error}。"""
     version = check_version(version)
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    base = release_base(version)
+    base = release_base(version, repo)
+    index: dict[str, Any] = {}
+
+    def fetch(name: str, direct_timeout: float | None = None) -> Path:
+        return _fetch_asset(name, f"{base}/{name}", cache_dir / f"{_cache_name(name, version)}",
+                            timeout, repo, version, index, direct_timeout)
+
     try:
+        # 先用清单当探针、给一个更短的超时：它只有几百字节，等满 30 秒不值得。
+        # 直连被墙时（静默丢包、不是 RST）这一步省下的就是纯等待。
+        probe_timeout = min(timeout, PROBE_TIMEOUT)
         # 显式按字节解码再归一：不依赖 read_text 的隐式换行翻译，
         # 否则换个读法（newline="" / bytes）验签结论就变了。
-        manifest = signing.normalize_manifest(
-            _fetch(f"{base}/SHA256SUMS", cache_dir / f"SHA256SUMS-{version}", timeout)
-            .read_bytes()
-            .decode("utf-8")
-        )
-        signature = _fetch(f"{base}/SHA256SUMS.sig", cache_dir / f"SHA256SUMS-{version}.sig", timeout).read_text(
-            encoding="utf-8"
-        )
+        manifest = signing.normalize_manifest(fetch("SHA256SUMS", probe_timeout).read_bytes().decode("utf-8"))
+        signature = fetch("SHA256SUMS.sig").read_text(encoding="utf-8")
         name, expected = pick_wheel(manifest, version)
-        wheel = _fetch(f"{base}/{name}", cache_dir / name, timeout)
+        wheel = fetch(name)
         ok, verified, error = verify_or_force(wheel, manifest, signature, PUBLIC_KEY_B64, force)
         digest = signing.sha256_of(wheel)
         if not ok:
