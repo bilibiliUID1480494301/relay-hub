@@ -1506,7 +1506,7 @@ class AdminHandler(BaseHTTPRequestHandler):
     def _clients_state(self) -> dict[str, Any]:
         """客户端总览：把请求日志聚合成「谁、哪台设备、用了多少」的人话视图。
 
-        来源判定：日志行带任一 sm_* 字段 = 客户端 App（客户端身份头）；
+        来源判定：日志行带任一 ident_* 字段 = 客户端 App（客户端身份头）；
         否则 = 直连 API（第三方 SDK / curl）。聚合维度：App 按
         (令牌, 用户, 设备, 设备 ID)，直连按 (令牌, IP)——这样管理台
         一眼分清两类流量，再不用去原始请求表里翻。

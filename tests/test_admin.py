@@ -453,7 +453,7 @@ def test_clients_view_distinguishes_app_from_direct_api(tmp_path: Path) -> None:
         channel="c1", ok=False, status=502, reason="upstream 502", ip="192.168.1.60",
         ident_user="xiaoming", ident_ver="1.1.0", ident_dev="Pad-Pro", ident_did="abcd1234ef56",
     )
-    # 直连 API：无任何 sm_* 字段
+    # 直连 API：没有任何客户端身份头（ident_* 字段）
     reqlog_module.record(
         log, ts=now - 5, token="sdk-token", dialect="openai-chat", model="qwen3-32b",
         channel="c2", ok=True, tokens_in=10, tokens_out=5, ip="203.0.113.9",
