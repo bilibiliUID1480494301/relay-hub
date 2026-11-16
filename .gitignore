@@ -6,6 +6,9 @@ build/
 .pytest_cache/
 
 dist/
+# 构建暂存目录（dist0100、dist1231…）不进仓库：产物属于 Release，不是源码
+dist[0-9]*/
+.tmp_*/
 .pytest_tmp/
 build/
 *.egg-info/

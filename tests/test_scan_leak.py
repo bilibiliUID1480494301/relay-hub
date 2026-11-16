@@ -90,6 +90,15 @@ def test_detects_credentials_and_hostname(scanner, tmp_path: Path) -> None:
     assert scanner.scan(str(path)) >= 2
 
 
+def test_api_route_is_not_mistaken_for_local_path(scanner, tmp_path: Path) -> None:
+    """API 路由 '/users/me/' 不是本机路径：小写 /users/ 属于接口，别当 macOS 家目录。
+
+    0.12.32 打包时这条误判把整个构建 BLOCK 了一次——扫描器假阳性同样会阻断发布。
+    """
+    path = _zip(tmp_path, "route.zip", {"pkg/providers.py": "ME = '/users/me/'\n"})
+    assert scanner.scan(str(path)) == 0, "把 API 路由误判成本机路径了"
+
+
 def test_detects_in_tar_gz(scanner, tmp_path: Path) -> None:
     """sdist（tar.gz）路径同样要工作（走 extractfile 的文件对象分支）。"""
     fake = "C:" + "/Users/" + "bob/dev/y"

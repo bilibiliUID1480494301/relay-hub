@@ -24,11 +24,12 @@ import zipfile
 
 # 通用形态：与具体组织无关，写死在仓库里是安全的
 SHAPES = {
+    # 只有盘符分支大小写不敏感；两个 Unix 分支保持大小写敏感——
+    # 否则 API 路由 '/users/me/' 会被当成 macOS 家目录（0.12.32 构建时踩过）。
     "localpath": re.compile(
-        r"[A-Za-z]:[\\/](?:Users|Documents|AppData|dev|src|work)[\\/]"
+        r"(?i:[A-Za-z]:[\\/](?:Users|Documents|AppData|dev|src|work)[\\/])"
         r"|/Users/[A-Za-z0-9._-]+/"
-        r"|/home/[A-Za-z0-9._-]+/",
-        re.I,
+        r"|/home/[A-Za-z0-9._-]+/"
     ),
     "hostname": re.compile(r"\b(?:LAPTOP|DESKTOP|WIN)-[0-9A-Z]{6,}\b", re.I),
     "secret": re.compile(
