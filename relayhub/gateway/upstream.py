@@ -260,6 +260,19 @@ def _anthropic_text(content: Any) -> str:
     )
 
 
+# Anthropic 自家的服务端工具：它们不是 function 调用，要映射成 web_search_options
+# 之类的原生开关，不能当普通工具翻译。其余未知类型（例如上游自定义的搜索开关）
+# 一律原样透传——静默丢弃会让「开了联网搜索」变成「模型什么都没做」，比报错更难查。
+_ANTHROPIC_SERVER_TOOL_PREFIXES = (
+    "web_search", "computer", "bash", "text_editor", "code_execution", "memory", "tool_search",
+)
+
+
+def _is_anthropic_server_tool(tool: dict[str, Any]) -> bool:
+    kind = str(tool.get("type") or "")
+    return any(kind.startswith(prefix) for prefix in _ANTHROPIC_SERVER_TOOL_PREFIXES)
+
+
 def _anthropic_tools_to_openai(tools: Any) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for tool in tools or []:
@@ -269,6 +282,9 @@ def _anthropic_tools_to_openai(tools: Any) -> list[dict[str, Any]]:
         # 空参数的 function——那会让 OpenAI 上游收到一个必然误触发的假工具。
         # 它们由调用方（to_openai_request）映射成 web_search_options 之类的原生开关。
         if tool.get("type") not in (None, "", "custom"):
+            if _is_anthropic_server_tool(tool):
+                continue
+            out.append(dict(tool))
             continue
         params = tool.get("input_schema") or {"type": "object", "properties": {}}
         out.append(
@@ -336,6 +352,11 @@ def _openai_functions_to_anthropic(specs: Any) -> list[dict[str, Any]]:
         if not isinstance(spec, dict):
             continue
         func = spec.get("function", spec)
+        if not func.get("name"):
+            # 不是 function 形状（上游自定义的服务端工具开关）：原样透传，
+            # 让目标上游自己判断。之前会捏出 name=null 的假工具，上游只能报 400。
+            out.append(dict(spec))
+            continue
         params = func.get("parameters") or {"type": "object", "properties": {}}
         out.append(
             {

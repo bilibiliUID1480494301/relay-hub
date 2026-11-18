@@ -214,3 +214,55 @@ def test_openai_tool_message_image_url_becomes_anthropic_block() -> None:
     assert tr["tool_use_id"] == "call_1"
     assert tr["content"][0] == {"type": "text", "text": "截图："}
     assert tr["content"][1]["source"] == {"type": "base64", "media_type": "image/png", "data": "aGk="}
+
+
+def test_unknown_server_tool_passes_through_instead_of_vanishing() -> None:
+    """上游自定义的服务端工具开关（如 deepseek_web_search）不能静默丢掉。
+
+    丢掉的话客户端以为开了联网搜索，模型只是"没搜"，没有任何报错可查。
+    """
+    out = upstream.to_openai_request(
+        {
+            "model": "deepseek-flash",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "今天有什么新闻"}],
+            "tools": [
+                {"type": "deepseek_web_search"},
+                {"type": "deepseek_read_url"},
+                {"name": "get_time", "input_schema": {"type": "object", "properties": {}}},
+            ],
+        }
+    )
+    types = [t.get("type") for t in out["tools"]]
+    assert "deepseek_web_search" in types, f"未知工具被吃掉了：{types}"
+    assert "deepseek_read_url" in types
+    assert "function" in types, "普通 function 工具不该受影响"
+
+
+def test_anthropic_native_server_tool_still_maps_to_options() -> None:
+    """Anthropic 自家的 web_search 仍走 web_search_options，不能被当成未知工具透传。"""
+    out = upstream.to_openai_request(
+        {
+            "model": "m",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        }
+    )
+    assert out.get("web_search_options") == {}
+    assert "tools" not in out or not out["tools"]
+
+
+def test_openai_side_server_tool_not_faked_as_function() -> None:
+    """OpenAI 侧的非 function 条目不能变成 name=null 的假工具。"""
+    out = upstream.to_anthropic_request(
+        {
+            "model": "m",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "deepseek_web_search"}],
+        }
+    )
+    tools = out.get("tools") or []
+    assert tools and tools[0].get("type") == "deepseek_web_search"
+    assert "name" not in tools[0]
