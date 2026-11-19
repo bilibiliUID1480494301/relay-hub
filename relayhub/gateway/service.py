@@ -49,7 +49,12 @@ from .router import RelayOutcome, RouterError
 
 ident_module = None  # 未安装客户端扩展包时的占位：身份头整段跳过
 from .tokens import SCOPE_TEST, DownstreamToken, TokenStore, generate_token
-from .upstream import UpstreamError, cache_from_usage, to_anthropic_request
+from .upstream import (
+    UpstreamError,
+    cache_from_usage,
+    to_anthropic_request,
+    tool_usage_from_usage,
+)
 from .users import RedeemStore, UserError, UserStore
 from .users import can as user_can
 
@@ -1593,6 +1598,9 @@ class RelayHandler(BaseHTTPRequestHandler):
         upstream_cost: int = 0,
         channel: str = "",
         reason: str = "",
+        tool_search: int = 0,
+        tool_fetch: int = 0,
+        tool_image: int = 0,
     ) -> None:
         """写一条请求明细。终端只有一个：本方法不该被同一请求调两次。"""
         if identity is not None:
@@ -1657,6 +1665,9 @@ class RelayHandler(BaseHTTPRequestHandler):
             ident_src=("bad:" + ident_bad) if ident_bad else ident.get("src", ""),
             latency_ms=latency_ms,
             reason=reason,
+            tool_search=tool_search,
+            tool_fetch=tool_fetch,
+            tool_image=tool_image,
         )
 
     # -- 插件身份与插件日志 ------------------------------------------------
@@ -3271,6 +3282,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 if getattr(outcome, "key", None) else 0
             )
             self._record(identity, ok, tokens_in, tokens_out)
+            tool_search, tool_fetch, tool_image = getattr(usage, "tool_usage", (0, 0, 0))
             self._log_request(
                 started=started, dialect=dialect, model=model, identity=identity,
                 ok=ok, stream=True, status=200,
@@ -3278,6 +3290,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 cache_read=cache_read, cache_creation=cache_creation,
                 cost=cost, upstream_cost=up_cost, channel=outcome.label,
                 reason="" if ok else "stream interrupted",
+                tool_search=tool_search, tool_fetch=tool_fetch, tool_image=tool_image,
             )
             return
         if outcome.message is None:
@@ -3330,12 +3343,14 @@ class RelayHandler(BaseHTTPRequestHandler):
                     ).mark()
             except Exception:  # noqa: BLE001 - 观测失败绝不影响这次响应
                 pass
+        tool_search, tool_fetch, tool_image = tool_usage_from_usage(usage)
         self._log_request(
             started=started, dialect=dialect, model=model, identity=identity,
             ok=True, stream=False, status=200,
             tokens_in=tokens_in, tokens_out=tokens_out,
             cache_read=cache_read, cache_creation=cache_creation,
             cost=cost, upstream_cost=up_cost, channel=outcome.label,
+            tool_search=tool_search, tool_fetch=tool_fetch, tool_image=tool_image,
         )
         if dialect == "openai":
             self._send_json(200, openai_completion(model, outcome.message))

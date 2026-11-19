@@ -266,3 +266,25 @@ def test_openai_side_server_tool_not_faked_as_function() -> None:
     tools = out.get("tools") or []
     assert tools and tools[0].get("type") == "deepseek_web_search"
     assert "name" not in tools[0]
+
+
+def test_tool_usage_counts_billable_not_display_fields() -> None:
+    """计费次数取 tool_search/tool_fetch，不能取 web_search_requests（那是结果块数）。"""
+    usage = {
+        "input_tokens": 10,
+        "output_tokens": 20,
+        "server_tool_use": {
+            "web_search_requests": 1,
+            "web_fetch_requests": 4,
+            "tool_search": 3,
+            "tool_fetch": 0,
+            "tool_image_search": 1,
+        },
+    }
+    assert upstream.tool_usage_from_usage(usage) == (3, 0, 1)
+
+
+def test_tool_usage_absent_is_zero() -> None:
+    assert upstream.tool_usage_from_usage({}) == (0, 0, 0)
+    assert upstream.tool_usage_from_usage({"server_tool_use": None}) == (0, 0, 0)
+    assert upstream.tool_usage_from_usage(None) == (0, 0, 0)

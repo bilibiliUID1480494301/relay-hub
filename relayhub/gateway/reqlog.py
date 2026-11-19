@@ -175,6 +175,10 @@ def record(
     ident_src: str = "",
     latency_ms: float = 0.0,
     reason: str = "",
+    # 服务端工具计费次数：只观测，不参与计价。全 0 时不写键，老日志行仍同构。
+    tool_search: int = 0,
+    tool_fetch: int = 0,
+    tool_image: int = 0,
 ) -> None:
     """追加一条请求明细。reason 用于失败时的简短归因（不含请求体）。"""
     ts = ts if ts is not None else time.time()
@@ -215,6 +219,10 @@ def record(
         entry["upstream_cost"] = int(upstream_cost)
     if reason:
         entry["reason"] = str(reason)[:120]
+    if tool_search or tool_fetch or tool_image:
+        entry["tool_search"] = int(tool_search)
+        entry["tool_fetch"] = int(tool_fetch)
+        entry["tool_image"] = int(tool_image)
     try:
         daily = _daily_path(Path(path), ts)
         _ensure_dir(daily.parent)

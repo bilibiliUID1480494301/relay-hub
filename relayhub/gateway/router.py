@@ -169,15 +169,20 @@ class _TokenSink:
         self.output = 0
         self.cache_read = 0
         self.cache_creation = 0
+        # 搜索/抓取/图片搜索的计费次数：只观测，不参与计价
+        self.tool_usage: tuple[int, int, int] = (0, 0, 0)
 
     def __call__(
         self, tokens_in: int, tokens_out: int,
         cache_read: int = 0, cache_creation: int = 0,
+        tool_usage: tuple[int, int, int] | None = None,
     ) -> None:
         self.input = tokens_in
         self.output = tokens_out
         self.cache_read = cache_read
         self.cache_creation = cache_creation
+        if tool_usage is not None:
+            self.tool_usage = tool_usage
 
 
 class ExitGuard:

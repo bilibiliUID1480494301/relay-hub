@@ -98,6 +98,30 @@ def _trace_usage(usage: dict[str, Any], where: str) -> None:
         pass
 
 
+def tool_usage_from_usage(usage):
+    """从 usage 里取「计费口径」的工具次数：(搜索, 抓取, 图片搜索)。
+
+    DeepSeek 的 server_tool_use 里有两组长得像的字段：
+      * web_search_requests / web_fetch_requests —— 结果块数量，含错误块，仅供展示
+      * tool_search / tool_fetch / tool_image_search —— **计费次数**
+    一次搜索调用可能含多个查询词，按查询词计数。取错字段会少算搜索、多算抓取。
+    """
+    if not isinstance(usage, dict):
+        return 0, 0, 0
+    block = usage.get("server_tool_use")
+    if not isinstance(block, dict):
+        block = usage
+    try:
+        return (
+            int(block.get("tool_search") or 0),
+            int(block.get("tool_fetch") or 0),
+            int(block.get("tool_image_search") or 0),
+        )
+    except (TypeError, ValueError):
+        return 0, 0, 0
+
+
+
 def cache_from_usage(usage: dict[str, Any]) -> tuple[int, int]:
     """从 usage 提取缓存命中量。
 
@@ -1023,7 +1047,10 @@ def _stream_anthropic(
     # 占比极小，不值得冒这个风险。
     connpool.mark_dead(connection)
     if on_usage:
-        on_usage(tokens_in, tokens_out, cache_read, cache_creation)
+        try:
+            on_usage(tokens_in, tokens_out, cache_read, cache_creation, tool_usage_from_usage(usage))
+        except TypeError:
+            on_usage(tokens_in, tokens_out, cache_read, cache_creation)
 
 
 def _stream_openai_as_anthropic(
@@ -1220,7 +1247,10 @@ def _stream_openai_as_anthropic(
     # 占比极小，不值得冒这个风险。
     connpool.mark_dead(connection)
     if on_usage:
-        on_usage(tokens_in, tokens_out, cache_read, cache_creation)
+        try:
+            on_usage(tokens_in, tokens_out, cache_read, cache_creation, (0, 0, 0))
+        except TypeError:
+            on_usage(tokens_in, tokens_out, cache_read, cache_creation)
 
 
 def peek_first(events: Iterator[tuple[str, dict[str, Any]]]) -> tuple[tuple[str, dict[str, Any]], Iterator[tuple[str, dict[str, Any]]]]:

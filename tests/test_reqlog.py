@@ -144,3 +144,15 @@ def test_gateway_without_log_writes_nothing(tmp_path: Path) -> None:
         server.server_close()
         thread.join(timeout=5)
     assert not (tmp_path / "requests.jsonl").exists()
+
+
+def test_tool_counts_land_in_log(tmp_path) -> None:
+    """工具计费次数要进日志（只观测不计价），全 0 时不写键。"""
+    from relayhub.gateway import reqlog
+
+    path = tmp_path / "req.jsonl"
+    reqlog.record(path, ok=True, tokens_in=1, tokens_out=2, tool_search=3, tool_fetch=0, tool_image=1)
+    reqlog.record(path, ok=True, tokens_in=1, tokens_out=2)
+    rows = reqlog.tail(path, limit=10)
+    assert rows[0]["tool_search"] == 3 and rows[0]["tool_image"] == 1
+    assert "tool_search" not in rows[1]
