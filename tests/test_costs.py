@@ -59,3 +59,50 @@ def test_key_group_untouched_by_cost_fields() -> None:
                              cost_multiplier=0.5)])
     assert pool.keys[0].group == "paid"
     assert pool.keys[0].cost_multiplier == 0.5
+
+
+def test_upstream_cost_applies_peak_multiplier() -> None:
+    """上游分时：峰时按倍率加价，空闲按标价；没配峰时则恒定。"""
+    import time as _time
+
+    from relayhub.gateway.pool import UpstreamKey
+
+    base = dict(
+        key_id="k1", label="t", base_url="http://up", api_key="x",
+        price_in_per_1k=1.0, price_out_per_1k=2.0,
+    )
+    flat = UpstreamKey(**base)
+    assert flat.upstream_cost(1000, 1000) == 3
+
+    # 取一个本地小时当"峰时"，倍率 2：1000 in + 1000 out = 3 → 6
+    hour = _time.localtime().tm_hour
+    peak = UpstreamKey(**base, peak_hours=[hour], peak_multiplier=2.0)
+    assert peak.upstream_cost(1000, 1000, ts=_time.time()) == 6
+    # 不传 ts 就当没有分时信息，按标价
+    assert peak.upstream_cost(1000, 1000) == 3
+
+
+def test_price_api_payload_is_normalised() -> None:
+    """价格接口只认「每 1k token」的已换算数字；峰时价折成倍率。"""
+    from relayhub import pricing
+
+    got = pricing.parse_unit_prices({
+        "in_per_1k": 1, "out_per_1k": 2,
+        "peak_in_per_1k": 2, "peak_out_per_1k": 4,
+        "peak_hours": [9, 10, 25], "currency": "CNY",
+    })
+    assert got["price_in_per_1k"] == 1.0
+    assert got["price_out_per_1k"] == 2.0
+    assert got["peak_hours"] == [9, 10]        # 25 被丢掉，不是抛错
+    assert got["peak_multiplier"] == 2.0
+
+    try:
+        pricing.parse_unit_prices({"in_per_1k": "abc"})
+    except pricing.PricingError:
+        pass
+    else:
+        raise AssertionError("非数字应当报 PricingError")
+
+    # 只有峰时绝对价、没有标价时不能除零
+    got2 = pricing.parse_unit_prices({"in_per_1k": 0, "out_per_1k": 0, "peak_out_per_1k": 3})
+    assert got2.get("peak_multiplier", 1.0) == 1.0

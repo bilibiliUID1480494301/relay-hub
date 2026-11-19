@@ -165,8 +165,15 @@ class UpstreamKey:
     # 倍率。两个价全 0 = 成本未知（报表按 0，但语义是「没配价」不是「免费」）；
     # 免费上游显式 cost_multiplier=0.0。
     cost_multiplier: float = 1.0
+    # 上游分时：peak_hours 是「贵价小时」集合（本地时区 0-23），峰时单价 × peak_multiplier。
+    # 与用户侧 cost_of 的语义一致：标价按空闲价填，峰时再乘。默认不启用（倍率 1.0）。
+    peak_hours: list[int] = field(default_factory=list)
+    peak_multiplier: float = 1.0
     price_in_per_1k: float = 0.0
     price_out_per_1k: float = 0.0
+    # 上游自己的价格接口（可选）。约定返回已换算好的「每 1k token」数字——
+    # 各家格式不同，换算属于适配器的事，网关不猜。
+    price_source: str = ""
     enabled: bool = True
     note: str = ""
     auth_mode: str = AUTH_MODE_AUTO
@@ -215,10 +222,18 @@ class UpstreamKey:
     def cooling_down_for(self, now: float) -> float:
         return max(0.0, self.disabled_until - now)
 
-    def upstream_cost(self, tokens_in: int, tokens_out: int) -> int:
+    def peak_multiplier_at(self, ts: float | None = None) -> float:
+        """按时间取峰时倍率。没配峰时、或 ts 缺失 → 1.0（不加价也不打折）。"""
+        if not self.peak_hours or self.peak_multiplier <= 1.0 or ts is None:
+            return 1.0
+        if time.localtime(ts).tm_hour in set(self.peak_hours):
+            return float(self.peak_multiplier)
+        return 1.0
+
+    def upstream_cost(self, tokens_in: int, tokens_out: int, ts: float | None = None) -> int:
         """本次转发在上游的成本估计（点，向上取整）。
 
-        成本 = (in/1000*price_in + out/1000*price_out) × cost_multiplier。
+        成本 = (in/1000*price_in + out/1000*price_out) × cost_multiplier × 峰时倍率。
         单价未配置（两个价都 0）→ 0：语义是「没配价，算不出」，报表不要
         把它当成 0 成本利润。免费渠道（倍率 <=0）→ 恒 0。
         """
@@ -232,7 +247,7 @@ class UpstreamKey:
         )
         if base <= 0:
             return 0
-        return max(1, math.ceil(base * self.cost_multiplier))
+        return max(1, math.ceil(base * self.cost_multiplier * self.peak_multiplier_at(ts)))
 
     # -- 序列化 ----------------------------------------------------------
 
@@ -261,8 +276,11 @@ class UpstreamKey:
             weight=int(raw.get("weight", 1)),
             group=str(raw.get("group") or "default"),
             cost_multiplier=float(raw.get("cost_multiplier", 1.0) or 0.0),
+            peak_hours=[int(h) for h in (raw.get("peak_hours") or []) if 0 <= int(h) <= 23],
+            peak_multiplier=float(raw.get("peak_multiplier", 1.0) or 1.0),
             price_in_per_1k=float(raw.get("price_in_per_1k", 0.0) or 0.0),
             price_out_per_1k=float(raw.get("price_out_per_1k", 0.0) or 0.0),
+            price_source=str(raw.get("price_source") or ""),
             enabled=bool(raw.get("enabled", True)),
             note=str(raw.get("note", "")),
             auth_mode=str(raw.get("auth_mode") or AUTH_MODE_AUTO),

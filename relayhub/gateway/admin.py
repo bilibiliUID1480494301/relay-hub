@@ -876,6 +876,12 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._add_key()
             return
         identifier = parts[2]
+        if len(parts) == 4 and parts[3] == "price":
+            if method != "POST":
+                self._error(405, "拉取价格用 POST /api/keys/<id>/price")
+                return
+            self._pull_price(identifier)
+            return
         if len(parts) == 4 and parts[3] == "probe":
             if method != "POST":
                 self._error(405, "探活用 POST /api/keys/<id>/probe")
@@ -924,6 +930,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                     "cost_multiplier": float(body.get("cost_multiplier") if body.get("cost_multiplier") not in (None, "") else 1.0),
                     "price_in_per_1k": float(body.get("price_in_per_1k") or 0.0),
                     "price_out_per_1k": float(body.get("price_out_per_1k") or 0.0),
+                    "peak_hours": [int(h) for h in (body.get("peak_hours") or []) if 0 <= int(h) <= 23],
+                    "peak_multiplier": float(body.get("peak_multiplier") if body.get("peak_multiplier") not in (None, "") else 1.0),
                     "note": body.get("note") or "",
                 }
             )
@@ -990,6 +998,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                 key.price_in_per_1k = float(body["price_in_per_1k"] or 0.0)
             if body.get("price_out_per_1k") is not None:
                 key.price_out_per_1k = float(body["price_out_per_1k"] or 0.0)
+            if body.get("peak_hours") is not None:
+                key.peak_hours = [int(h) for h in (body.get("peak_hours") or []) if 0 <= int(h) <= 23]
+            if body.get("peak_multiplier") is not None:
+                key.peak_multiplier = float(body["peak_multiplier"] or 1.0)
             if body.get("note") is not None:
                 key.note = str(body["note"])
             if body.get("weight") is not None:
@@ -1015,6 +1027,46 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._error(409 if "找不到" not in str(exc) else 404, str(exc))
             return
         self._send_json(200, self._state())
+
+    def _pull_price(self, identifier: str) -> None:
+        """按渠道的价格接口（或请求里给的 url）拉一次单价并写回。
+
+        约定返回的是「已换算成每 1k token」的数字，网关不做币种/倍率猜算。
+        """
+        body = self._read_json() or {}
+        applied: dict = {}
+
+        def change(pool: KeyPool) -> None:
+            key = pool.find(identifier) or pool.find_by_label(identifier)
+            if key is None:
+                raise PoolError(f"找不到渠道 {identifier}")
+            url = str(body.get("url") or key.price_source or "").strip()
+            if not url:
+                raise PoolError("该渠道没有配置价格接口：先在请求里给 url，或保存 price_source")
+            try:
+                parsed = pricing_module.fetch_unit_prices(
+                    url, key.api_key if body.get("with_key") else ""
+                )
+            except pricing_module.PricingError as exc:
+                raise PoolError(str(exc)) from exc
+            key.price_in_per_1k = parsed["price_in_per_1k"]
+            key.price_out_per_1k = parsed["price_out_per_1k"]
+            if parsed.get("peak_hours"):
+                key.peak_hours = list(parsed["peak_hours"])
+            if parsed.get("peak_multiplier"):
+                key.peak_multiplier = float(parsed["peak_multiplier"])
+            if body.get("save_source"):
+                key.price_source = url
+            applied.update(parsed)
+            applied["label"] = key.label
+            pool.config_epoch += 1
+
+        try:
+            self._mutate(change)
+        except (PoolError, ValueError) as exc:
+            self._error(400, str(exc))
+            return
+        self._send_json(200, {"ok": True, "applied": applied, "state": self._state()})
 
     def _delete_key(self, identifier: str) -> None:
         def change(pool: KeyPool) -> None:
@@ -1145,6 +1197,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             "allow_register": pool.allow_register,
             "default_quota": pool.default_quota,
             "price_in_per_1k": pool.price_in_per_1k,
+            "peak_hours": list(pool.peak_hours),
+            "peak_multiplier": pool.peak_multiplier,
             "timezone": pool.timezone,
             "per_call": pool.per_call,
             "cache_read_ratio": pool.cache_read_ratio,
