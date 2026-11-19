@@ -932,6 +932,9 @@ class AdminHandler(BaseHTTPRequestHandler):
                     "price_out_per_1k": float(body.get("price_out_per_1k") or 0.0),
                     "peak_hours": [int(h) for h in (body.get("peak_hours") or []) if 0 <= int(h) <= 23],
                     "peak_multiplier": float(body.get("peak_multiplier") if body.get("peak_multiplier") not in (None, "") else 1.0),
+                    "long_context_threshold": int(body.get("long_context_threshold") or 0),
+                    "long_ctx_in_multiplier": float(body.get("long_ctx_in_multiplier") or 1.0),
+                    "long_ctx_out_multiplier": float(body.get("long_ctx_out_multiplier") or 1.0),
                     "note": body.get("note") or "",
                 }
             )
@@ -1002,6 +1005,12 @@ class AdminHandler(BaseHTTPRequestHandler):
                 key.peak_hours = [int(h) for h in (body.get("peak_hours") or []) if 0 <= int(h) <= 23]
             if body.get("peak_multiplier") is not None:
                 key.peak_multiplier = float(body["peak_multiplier"] or 1.0)
+            if body.get("long_context_threshold") is not None:
+                key.long_context_threshold = int(body["long_context_threshold"] or 0)
+            if body.get("long_ctx_in_multiplier") is not None:
+                key.long_ctx_in_multiplier = float(body["long_ctx_in_multiplier"] or 1.0)
+            if body.get("long_ctx_out_multiplier") is not None:
+                key.long_ctx_out_multiplier = float(body["long_ctx_out_multiplier"] or 1.0)
             if body.get("note") is not None:
                 key.note = str(body["note"])
             if body.get("weight") is not None:

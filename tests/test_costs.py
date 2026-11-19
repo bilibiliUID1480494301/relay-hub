@@ -87,12 +87,12 @@ def test_price_api_payload_is_normalised() -> None:
     from relayhub import pricing
 
     got = pricing.parse_unit_prices({
-        "in_per_1k": 1, "out_per_1k": 2,
-        "peak_in_per_1k": 2, "peak_out_per_1k": 4,
+        "in_per_1k": 0.1, "out_per_1k": 0.2,
+        "peak_in_per_1k": 0.2, "peak_out_per_1k": 0.4,
         "peak_hours": [9, 10, 25], "currency": "CNY",
     })
-    assert got["price_in_per_1k"] == 1.0
-    assert got["price_out_per_1k"] == 2.0
+    assert got["price_in_per_1k"] == 0.1
+    assert got["price_out_per_1k"] == 0.2
     assert got["peak_hours"] == [9, 10]        # 25 被丢掉，不是抛错
     assert got["peak_multiplier"] == 2.0
 
@@ -106,3 +106,46 @@ def test_price_api_payload_is_normalised() -> None:
     # 只有峰时绝对价、没有标价时不能除零
     got2 = pricing.parse_unit_prices({"in_per_1k": 0, "out_per_1k": 0, "peak_out_per_1k": 3})
     assert got2.get("peak_multiplier", 1.0) == 1.0
+
+
+def test_upstream_cost_long_context_tier() -> None:
+    """超过阈值整条请求重算，输入/输出倍率可以不同（OpenAI 是 2×/1.5×）。"""
+    from relayhub.gateway.pool import UpstreamKey
+
+    key = UpstreamKey(
+        key_id="k1", label="t", base_url="http://up", api_key="x",
+        price_in_per_1k=1.0, price_out_per_1k=2.0,
+        long_context_threshold=200_000,
+        long_ctx_in_multiplier=2.0, long_ctx_out_multiplier=1.5,
+    )
+    # 未达阈值：100k in + 100k out = 100 + 200 = 300
+    assert key.upstream_cost(100_000, 100_000) == 300
+    # 刚好到阈值：整条按 2×/1.5× → 200k×2×1 + 100k×1.5×2 = 400 + 300 = 700
+    assert key.upstream_cost(200_000, 100_000) == 700
+    # 阈值 0 = 不分档
+    flat = UpstreamKey(
+        key_id="k2", label="t", base_url="http://up", api_key="x",
+        price_in_per_1k=1.0, price_out_per_1k=2.0,
+    )
+    assert flat.upstream_cost(500_000, 500_000) == 1500
+
+
+def test_price_api_long_context_is_converted_to_multiplier() -> None:
+    from relayhub import pricing
+
+    got = pricing.parse_unit_prices({
+        "in_per_1k": 0.002, "out_per_1k": 0.008,
+        "long_context_threshold": 272000,
+        "long_ctx_in_per_1k": 0.004, "long_ctx_out_per_1k": 0.012,
+    })
+    assert got["long_context_threshold"] == 272000
+    assert got["long_ctx_in_multiplier"] == 2.0
+    assert got["long_ctx_out_multiplier"] == 1.5
+
+    # 百万 token 单价忘了除 1000 时直接报错，而不是默默记成 1000 倍成本
+    try:
+        pricing.parse_unit_prices({"in_per_1k": 2.0, "out_per_1k": 8.0})
+    except pricing.PricingError as exc:
+        assert "除以 1000" in str(exc)
+    else:
+        raise AssertionError("应当拦住单位错误")

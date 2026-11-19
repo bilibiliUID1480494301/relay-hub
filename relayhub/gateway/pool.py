@@ -169,6 +169,11 @@ class UpstreamKey:
     # 与用户侧 cost_of 的语义一致：标价按空闲价填，峰时再乘。默认不启用（倍率 1.0）。
     peak_hours: list[int] = field(default_factory=list)
     peak_multiplier: float = 1.0
+    # 长上下文分档：输入 token 达到阈值后，整条请求按更高单价重算（OpenAI >272K 是
+    # 输入 2×/输出 1.5×，Gemini >200K 是整体翻倍，xAI >200K 是 2×）。阈值 0 = 不分档。
+    long_context_threshold: int = 0
+    long_ctx_in_multiplier: float = 1.0
+    long_ctx_out_multiplier: float = 1.0
     price_in_per_1k: float = 0.0
     price_out_per_1k: float = 0.0
     # 上游自己的价格接口（可选）。约定返回已换算好的「每 1k token」数字——
@@ -222,6 +227,19 @@ class UpstreamKey:
     def cooling_down_for(self, now: float) -> float:
         return max(0.0, self.disabled_until - now)
 
+    def long_context_multipliers(self, tokens_in: int) -> tuple[float, float]:
+        """输入超过阈值时返回 (输入倍率, 输出倍率)，否则 (1, 1)。
+
+        注意语义：厂商是**整条请求重算**（不只是超出部分），所以这里按总量乘。
+        输入和输出分开给倍率，因为 OpenAI 是 2×/1.5×，不是统一倍数。
+        """
+        if self.long_context_threshold <= 0 or tokens_in < self.long_context_threshold:
+            return 1.0, 1.0
+        return (
+            max(1.0, float(self.long_ctx_in_multiplier or 1.0)),
+            max(1.0, float(self.long_ctx_out_multiplier or 1.0)),
+        )
+
     def peak_multiplier_at(self, ts: float | None = None) -> float:
         """按时间取峰时倍率。没配峰时、或 ts 缺失 → 1.0（不加价也不打折）。"""
         if not self.peak_hours or self.peak_multiplier <= 1.0 or ts is None:
@@ -241,9 +259,10 @@ class UpstreamKey:
             return 0
         if not self.price_in_per_1k and not self.price_out_per_1k:
             return 0
+        in_mult, out_mult = self.long_context_multipliers(tokens_in)
         base = (
-            tokens_in / 1000.0 * self.price_in_per_1k
-            + tokens_out / 1000.0 * self.price_out_per_1k
+            tokens_in / 1000.0 * self.price_in_per_1k * in_mult
+            + tokens_out / 1000.0 * self.price_out_per_1k * out_mult
         )
         if base <= 0:
             return 0
@@ -278,6 +297,9 @@ class UpstreamKey:
             cost_multiplier=float(raw.get("cost_multiplier", 1.0) or 0.0),
             peak_hours=[int(h) for h in (raw.get("peak_hours") or []) if 0 <= int(h) <= 23],
             peak_multiplier=float(raw.get("peak_multiplier", 1.0) or 1.0),
+            long_context_threshold=int(raw.get("long_context_threshold", 0) or 0),
+            long_ctx_in_multiplier=float(raw.get("long_ctx_in_multiplier", 1.0) or 1.0),
+            long_ctx_out_multiplier=float(raw.get("long_ctx_out_multiplier", 1.0) or 1.0),
             price_in_per_1k=float(raw.get("price_in_per_1k", 0.0) or 0.0),
             price_out_per_1k=float(raw.get("price_out_per_1k", 0.0) or 0.0),
             price_source=str(raw.get("price_source") or ""),

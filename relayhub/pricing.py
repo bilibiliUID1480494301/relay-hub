@@ -103,6 +103,13 @@ def parse_unit_prices(payload: dict[str, Any]) -> dict[str, Any]:
         "peak_hours": hours,
         "currency": str(payload.get("currency") or ""),
     }
+    # 单位防呆：当前最贵的旗舰约 $15/百万 ≈ $0.015/千，每千超过 1 必是
+    # 「百万 token 单价忘了除 1000」——差 1000 倍的错，不能让它默默进账。
+    for field in ("price_in_per_1k", "price_out_per_1k"):
+        if out[field] > 1:
+            raise PricingError(
+                f"{field}={out[field]} 明显是每百万 token 的价，请先除以 1000"
+            )
     peak_in = num("peak_in_per_1k")
     peak_out = num("peak_out_per_1k")
     if peak_in or peak_out:
@@ -112,6 +119,20 @@ def parse_unit_prices(payload: dict[str, Any]) -> dict[str, Any]:
             peak_out / out["price_out_per_1k"] if out["price_out_per_1k"] else 0.0,
         ) if r > 0]
         out["peak_multiplier"] = round(max(ratios), 4) if ratios else 1.0
+
+    # 长上下文分档：厂商给的是「超阈值后的绝对价」，换算成相对标价的倍率
+    threshold = int(payload.get("long_context_threshold") or 0)
+    if threshold > 0:
+        ctx_in = num("long_ctx_in_per_1k")
+        ctx_out = num("long_ctx_out_per_1k")
+        if ctx_in or ctx_out:
+            out["long_context_threshold"] = threshold
+            out["long_ctx_in_multiplier"] = round(
+                ctx_in / out["price_in_per_1k"], 4
+            ) if ctx_in and out["price_in_per_1k"] else 1.0
+            out["long_ctx_out_multiplier"] = round(
+                ctx_out / out["price_out_per_1k"], 4
+            ) if ctx_out and out["price_out_per_1k"] else 1.0
     return out
 
 
