@@ -189,6 +189,7 @@ def public_key(key: UpstreamKey, now: float) -> dict[str, Any]:
         # 这些是定价信息不是密钥，给管理面看见没风险。
         "price_in_per_1k": key.price_in_per_1k,
         "price_out_per_1k": key.price_out_per_1k,
+        "price_cache_read_per_1k": key.price_cache_read_per_1k,
         "cost_multiplier": key.cost_multiplier,
         "peak_hours": list(key.peak_hours),
         "peak_days": list(key.peak_days),
@@ -952,6 +953,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                     "cost_multiplier": float(body.get("cost_multiplier") if body.get("cost_multiplier") not in (None, "") else 1.0),
                     "price_in_per_1k": float(body.get("price_in_per_1k") or 0.0),
                     "price_out_per_1k": float(body.get("price_out_per_1k") or 0.0),
+                    "price_cache_read_per_1k": float(body.get("price_cache_read_per_1k") or 0.0),
                     "icon": str(body.get("icon") or ""),
                     "peak_hours": [int(h) for h in (body.get("peak_hours") or []) if 0 <= int(h) <= 23],
                     "peak_days": [int(d) for d in (body.get("peak_days") or []) if 1 <= int(d) <= 7],
@@ -1025,6 +1027,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                 key.price_in_per_1k = float(body["price_in_per_1k"] or 0.0)
             if body.get("price_out_per_1k") is not None:
                 key.price_out_per_1k = float(body["price_out_per_1k"] or 0.0)
+            if body.get("price_cache_read_per_1k") is not None:
+                key.price_cache_read_per_1k = float(body["price_cache_read_per_1k"] or 0.0)
             if body.get("icon") is not None:
                 key.icon = str(body.get("icon") or "")
             if body.get("peak_days") is not None:

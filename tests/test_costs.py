@@ -175,3 +175,31 @@ def test_peak_multiplier_respects_weekdays() -> None:
         peak_multiplier=2.0,
     )
     assert every_day.peak_multiplier_at(now) == 2.0
+
+
+def test_upstream_cost_splits_cache_read() -> None:
+    """缓存命中的输入按缓存价算；没配缓存价则按输入价（高于等于实际，不低估）。"""
+    from relayhub.gateway.pool import UpstreamKey
+
+    base = dict(
+        key_id="k", label="t", base_url="http://up", api_key="x",
+        price_in_per_1k=0.01, price_out_per_1k=0.04,
+    )
+    # 1M 输入里 800k 命中，缓存价 0.0002/1k：
+    # 200k*0.01/1k = 2.0 + 800k*0.0002/1k = 0.16 → 2.16 → 向上取整 3
+    priced = UpstreamKey(**base, price_cache_read_per_1k=0.0002)
+    assert priced.upstream_cost(1_000_000, 0, cache_read=800_000) == 3
+
+    # 不配缓存价：全按输入价 1M*0.01/1k = 10
+    plain = UpstreamKey(**base)
+    assert plain.upstream_cost(1_000_000, 0, cache_read=800_000) == 10
+
+    # cache_read 超过输入时不能算负
+    assert plain.upstream_cost(100, 0, cache_read=999) == 1
+
+    # 只配了缓存价也算「配了价」，不该被当成 0 成本
+    only_cache = UpstreamKey(
+        key_id="k3", label="t", base_url="http://up", api_key="x",
+        price_cache_read_per_1k=0.001,
+    )
+    assert only_cache.upstream_cost(1000, 0, cache_read=1000) >= 1

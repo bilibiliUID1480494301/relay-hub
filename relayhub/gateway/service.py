@@ -3278,7 +3278,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                         self.users.settle(identity.user_id, pre, pre)
                         cost = pre
             up_cost = (
-                outcome.key.upstream_cost(tokens_in, tokens_out, ts=started)
+                outcome.key.upstream_cost(tokens_in, tokens_out, ts=started, cache_read=cache_read)
                 if getattr(outcome, "key", None) else 0
             )
             self._record(identity, ok, tokens_in, tokens_out)
@@ -3320,7 +3320,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         # 记账赶在写响应之前：响应字节一出去，客户端就可能立刻断开，
         # 账还没落盘就被读到旧值（测试里表现为偶发丢一次）。
         up_cost = (
-            outcome.key.upstream_cost(tokens_in, tokens_out, ts=started)
+            outcome.key.upstream_cost(tokens_in, tokens_out, ts=started, cache_read=cache_read)
             if getattr(outcome, "key", None) else 0
         )
         self._record(identity, True, tokens_in, tokens_out)

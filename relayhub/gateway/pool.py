@@ -180,6 +180,8 @@ class UpstreamKey:
     long_ctx_out_multiplier: float = 1.0
     price_in_per_1k: float = 0.0
     price_out_per_1k: float = 0.0
+    # 缓存命中输入的单价（每 1k token）。0 = 未配置，按输入价算（保守，不低估）。
+    price_cache_read_per_1k: float = 0.0
     # 模型/厂商图标：URL 或 data URI（管理面显示用，不参与调用）。
     icon: str = ""
     # 上游自己的价格接口（可选）。约定返回已换算好的「每 1k token」数字——
@@ -257,7 +259,13 @@ class UpstreamKey:
             return 1.0   # 周末/非指定星期：按谷价
         return float(self.peak_multiplier)
 
-    def upstream_cost(self, tokens_in: int, tokens_out: int, ts: float | None = None) -> int:
+    def upstream_cost(
+        self,
+        tokens_in: int,
+        tokens_out: int,
+        ts: float | None = None,
+        cache_read: int = 0,
+    ) -> int:
         """本次转发在上游的成本估计（点，向上取整）。
 
         成本 = (in/1000*price_in + out/1000*price_out) × cost_multiplier × 峰时倍率。
@@ -266,11 +274,21 @@ class UpstreamKey:
         """
         if self.cost_multiplier <= 0:
             return 0
-        if not self.price_in_per_1k and not self.price_out_per_1k:
+        if (
+            not self.price_in_per_1k
+            and not self.price_out_per_1k
+            and not self.price_cache_read_per_1k
+        ):
             return 0
         in_mult, out_mult = self.long_context_multipliers(tokens_in)
+        # 缓存命中那部分输入按缓存价算（上游本来就收得少）；没配缓存价就按输入价，
+        # 宁可高估也不低估——低估会让超卖预警提前失效。
+        cached = max(0, min(int(cache_read or 0), int(tokens_in or 0)))
+        fresh_in = max(0, int(tokens_in or 0) - cached)
+        cache_price = self.price_cache_read_per_1k or self.price_in_per_1k
         base = (
-            tokens_in / 1000.0 * self.price_in_per_1k * in_mult
+            fresh_in / 1000.0 * self.price_in_per_1k * in_mult
+            + cached / 1000.0 * cache_price * in_mult
             + tokens_out / 1000.0 * self.price_out_per_1k * out_mult
         )
         if base <= 0:
@@ -312,6 +330,7 @@ class UpstreamKey:
             long_ctx_out_multiplier=float(raw.get("long_ctx_out_multiplier", 1.0) or 1.0),
             price_in_per_1k=float(raw.get("price_in_per_1k", 0.0) or 0.0),
             price_out_per_1k=float(raw.get("price_out_per_1k", 0.0) or 0.0),
+            price_cache_read_per_1k=float(raw.get("price_cache_read_per_1k", 0.0) or 0.0),
             price_source=str(raw.get("price_source") or ""),
             icon=str(raw.get("icon") or ""),
             enabled=bool(raw.get("enabled", True)),
