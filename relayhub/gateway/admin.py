@@ -121,6 +121,16 @@ LOGIN_HTML = """<!doctype html>
  input{width:100%;padding:.5rem;margin:.4rem 0 1rem;border-radius:8px;border:1px solid #444;background:#111;color:#eee;box-sizing:border-box}
  button{width:100%;padding:.55rem;border:0;border-radius:8px;background:#3b82f6;color:#fff;font-size:1rem}
  .err{color:#f87171;min-height:1.2em;font-size:.85rem}
+.mgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;margin-top:12px}
+.mcard{border:1px solid var(--line,#e5e7eb);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.mhead{display:flex;align-items:center;gap:9px;min-width:0}
+.micon{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:600;font-size:13px;flex:0 0 auto}
+.mname{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msub{font-size:11.5px;opacity:.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mchips{display:flex;flex-wrap:wrap;gap:4px}
+.chip2{font-size:11px;border:1px solid var(--line,#e5e7eb);border-radius:999px;padding:1px 7px;opacity:.85}
+.mstats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:11.5px}
+.mstats b{display:block;font-size:13px}
 </style></head><body>
 <form onsubmit="return doLogin()">
  <h1>__SITE__ 号池管理 · Key Pool Admin</h1>
@@ -175,10 +185,22 @@ def public_key(key: UpstreamKey, now: float) -> dict[str, Any]:
         "cooling_down_for": round(key.cooling_down_for(now), 1),
         "cooldown_tier": key.cooldown_tier,
         "credits": key.credits,
+        # 计费口径：模型广场要显示价格与「分时/长上下文」标签。
+        # 这些是定价信息不是密钥，给管理面看见没风险。
+        "price_in_per_1k": key.price_in_per_1k,
+        "price_out_per_1k": key.price_out_per_1k,
+        "cost_multiplier": key.cost_multiplier,
+        "peak_hours": list(key.peak_hours),
+        "peak_days": list(key.peak_days),
+        "peak_multiplier": key.peak_multiplier,
+        "long_context_threshold": key.long_context_threshold,
+        "long_ctx_in_multiplier": key.long_ctx_in_multiplier,
+        "long_ctx_out_multiplier": key.long_ctx_out_multiplier,
         "consecutive_failures": key.consecutive_failures,
         "last_error": key.last_error,
         "key_hint": key_hint(key.api_key),
         "has_key": bool(key.api_key),
+        "icon": key.icon,
         "usage": asdict(key.usage),
     }
 
@@ -930,7 +952,9 @@ class AdminHandler(BaseHTTPRequestHandler):
                     "cost_multiplier": float(body.get("cost_multiplier") if body.get("cost_multiplier") not in (None, "") else 1.0),
                     "price_in_per_1k": float(body.get("price_in_per_1k") or 0.0),
                     "price_out_per_1k": float(body.get("price_out_per_1k") or 0.0),
+                    "icon": str(body.get("icon") or ""),
                     "peak_hours": [int(h) for h in (body.get("peak_hours") or []) if 0 <= int(h) <= 23],
+                    "peak_days": [int(d) for d in (body.get("peak_days") or []) if 1 <= int(d) <= 7],
                     "peak_multiplier": float(body.get("peak_multiplier") if body.get("peak_multiplier") not in (None, "") else 1.0),
                     "long_context_threshold": int(body.get("long_context_threshold") or 0),
                     "long_ctx_in_multiplier": float(body.get("long_ctx_in_multiplier") or 1.0),
@@ -1001,6 +1025,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                 key.price_in_per_1k = float(body["price_in_per_1k"] or 0.0)
             if body.get("price_out_per_1k") is not None:
                 key.price_out_per_1k = float(body["price_out_per_1k"] or 0.0)
+            if body.get("icon") is not None:
+                key.icon = str(body.get("icon") or "")
+            if body.get("peak_days") is not None:
+                key.peak_days = [int(d) for d in (body.get("peak_days") or []) if 1 <= int(d) <= 7]
             if body.get("peak_hours") is not None:
                 key.peak_hours = [int(h) for h in (body.get("peak_hours") or []) if 0 <= int(h) <= 23]
             if body.get("peak_multiplier") is not None:
@@ -2644,6 +2672,107 @@ display:none;border:1px solid var(--line);background:var(--panel)}
 .dot.on{background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
 .dot.off{background:var(--line)}
 .tabs .gap{width:12px;flex:none}
+/* ---- 视觉统一覆盖层：把配色/字号/控件/表格拉齐到与桌面控制台一致 ----
+   只覆盖表现，不动任何结构；旧规则仍在，靠后面的优先级覆盖。 */
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --fg:#111827; --muted:#6b7280; --line:#e5e7eb;
+  --accent:#2563eb; --accent-soft:#eff4ff;
+  --ok:#16815a; --ok-soft:#e8f6ef; --warn:#b5770a; --warn-soft:#fdf3e2;
+  --bad:#c0392b; --bad-soft:#fdeceb;
+  --r-sm:6px; --r-md:9px; --r-lg:12px; --ctl:34px;
+}
+@media(prefers-color-scheme:dark){
+  :root{ --bg:#101113; --panel:#17181b; --fg:#e8e8ea; --muted:#9aa1ab; --line:#2a2c30;
+         --accent:#5b8def; --accent-soft:#1a2333;
+         --ok:#3fae83; --ok-soft:#12261f; --warn:#d79a2b; --warn-soft:#2a2113;
+         --bad:#e06c5f; --bad-soft:#2b1817; }
+}
+body{ background:var(--bg); color:var(--fg);
+      font:13.5px/1.6 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;
+      -webkit-font-smoothing:antialiased; }
+.wrap{ max-width:1320px; padding:20px 22px 56px; column-gap:18px;
+       grid-template-columns:196px minmax(0,1fr); }
+header{ margin-bottom:16px; align-items:center; }
+h1{ font-size:16px; font-weight:600; letter-spacing:.2px; }
+h2{ font-size:13.5px; font-weight:600; margin:0 0 10px; letter-spacing:.2px; }
+.meta{ font-size:11.5px; }
+
+/* 侧栏导航 */
+#tabs{ padding:6px; border-radius:var(--r-lg); background:var(--panel);
+       border:1px solid var(--line); gap:2px; }
+#tabs button{ height:32px; padding:0 10px; border-radius:var(--r-md); font-size:13px;
+              color:var(--muted); border:0; transition:background .12s,color .12s; }
+#tabs button:hover{ background:var(--line); color:var(--fg); opacity:1; }
+#tabs button.active{ background:var(--accent-soft); color:var(--accent); font-weight:600; }
+
+/* 面板与卡片 */
+.panel{ background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg);
+        padding:16px; margin-bottom:12px; box-shadow:none; }
+.card{ border-radius:var(--r-lg); box-shadow:none; }
+.cards{ gap:10px; }
+
+/* 控件统一高度 */
+input,select,button,textarea{
+  font:inherit; font-size:13px; color:inherit; height:var(--ctl);
+  border:1px solid var(--line); border-radius:var(--r-md); background:var(--panel);
+  padding:0 10px; transition:border-color .12s,box-shadow .12s;
+}
+textarea{ height:auto; padding:8px 10px; line-height:1.55; }
+input:focus,select:focus,textarea:focus{
+  outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+button{ cursor:pointer; padding:0 12px; }
+button:hover{ border-color:var(--muted); opacity:1; }
+button.primary,.btn-primary{ background:var(--accent); border-color:var(--accent); color:#fff; }
+button.primary:hover{ filter:brightness(1.06); }
+button.ghost{ background:transparent; }
+button.danger{ color:var(--bad); border-color:var(--bad); }
+
+/* 表格：去掉竖线，弱化表头，行悬停 */
+table{ width:100%; border-collapse:collapse; font-size:12.5px; }
+th{ text-align:left; font-weight:600; font-size:11.5px; color:var(--muted);
+    padding:7px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+td{ padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+tbody tr:hover td{ background:var(--accent-soft); }
+.mono,td.mono{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+
+/* 标签 / 徽标 */
+.tag{ display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px;
+      border:1px solid var(--line); color:var(--muted); line-height:1.7; }
+.t-on,.t-ok{ color:var(--ok); border-color:var(--ok); background:var(--ok-soft); }
+.t-off,.t-bad{ color:var(--bad); border-color:var(--bad); background:var(--bad-soft); }
+.t-warn{ color:var(--warn); border-color:var(--warn); background:var(--warn-soft); }
+.chip2{ border-radius:999px; padding:1px 8px; color:var(--muted); }
+
+/* 模型广场卡片 */
+.mgrid{ display:grid; gap:12px; grid-template-columns:repeat(auto-fill,minmax(252px,1fr)); }
+.mcard{ position:relative; border-radius:var(--r-lg); padding:0; background:var(--panel);
+        border:1px solid var(--line); overflow:hidden;
+        transition:border-color .14s, box-shadow .14s, transform .14s; }
+.mcard:hover{ border-color:var(--accent); box-shadow:0 6px 18px rgba(37,99,235,.10);
+              transform:translateY(-1px); }
+.mcard .mbody{ padding:13px 14px 12px; display:flex; flex-direction:column; gap:10px; }
+.mhead{ display:flex; align-items:center; gap:10px; min-width:0; }
+.micon.img{ object-fit:contain; background:#fff; padding:3px; }
+.micon{ width:32px; height:32px; border-radius:9px; font-size:13.5px; letter-spacing:0;
+        display:flex; align-items:center; justify-content:center; color:#fff; font-weight:600;
+        flex:0 0 auto; box-shadow:inset 0 0 0 1px rgba(255,255,255,.18); }
+.mname{ font-size:13.5px; font-weight:600; line-height:1.35; }
+.msub{ font-size:11.5px; color:var(--muted); line-height:1.4; }
+.mchips{ display:flex; flex-wrap:wrap; gap:4px; }
+.chip2{ font-size:11px; color:var(--muted); background:var(--bg);
+        border:1px solid var(--line); border-radius:6px; padding:0 6px; line-height:1.7; }
+.mprice{ display:flex; gap:14px; align-items:baseline; padding-top:9px;
+         border-top:1px solid var(--line); font-variant-numeric:tabular-nums; }
+.mprice .k{ font-size:11px; color:var(--muted); margin-right:4px; }
+.mprice .v{ font-size:13.5px; font-weight:600; }
+.mprice .u{ font-size:10.5px; color:var(--muted); margin-left:2px; }
+.mstats{ display:flex; gap:0; margin-top:2px; font-variant-numeric:tabular-nums; }
+.mstats > div{ flex:1; min-width:0; padding-right:8px; }
+.mstats > div + div{ border-left:1px solid var(--line); padding-left:8px; }
+.mstats b{ display:block; font-size:13px; font-weight:600; line-height:1.3; }
+.mstats span{ font-size:10.5px; color:var(--muted); }
+.mstats.empty{ font-size:11.5px; color:var(--muted); padding-top:2px; }
+.mdot{ width:7px; height:7px; border-radius:50%; flex:0 0 auto; }
 </style>
 </head>
 <body>
@@ -2662,6 +2791,7 @@ display:none;border:1px solid var(--line);background:var(--panel)}
   <button data-tab="clients">客户端</button>
   <span class="gap"></span>
   <button data-tab="pool" class="active">渠道</button>
+  <button data-tab="models">模型</button>
   <button data-tab="tokens">下游令牌</button>
   <button data-tab="policy">接入策略</button>
   <span class="gap"></span>
@@ -2700,6 +2830,27 @@ display:none;border:1px solid var(--line);background:var(--panel)}
     <th>常用模型</th><th>最近活跃</th></tr></thead>
     <tbody id="cl-rows"></tbody>
   </table></div>
+</section>
+</div>
+
+<div class="pane" id="pane-models" style="display:none">
+<section class="panel">
+  <h2>模型广场</h2>
+  <p class="muted">本站已启用的模型：价格、速度（输出 tok/s 中位数）、成功率、调用量。
+     数据来自渠道清单与请求明细，本地计算，不依赖第三方打点。</p>
+  <div class="row">
+    <input id="md-q" placeholder="搜索模型 / 渠道 / 分组" style="flex:2 1 220px" />
+    <select id="md-sort" style="flex:0 1 150px">
+      <option value="calls">按调用量</option>
+      <option value="ok">按成功率</option>
+      <option value="speed">按速度</option>
+      <option value="price">按价格</option>
+      <option value="name">按名称</option>
+    </select>
+    <button id="md-refresh">刷新</button>
+    <span class="muted" id="md-msg"></span>
+  </div>
+  <section class="mgrid" id="md-grid"></section>
 </section>
 </div>
 
@@ -3327,6 +3478,7 @@ function loadPane(name){
   if(name==='toip'){loadToip();return;}
   if(name==='theme'){loadTheme();return;}
   if(name==='audit'){loadAudit();return;}
+  if(name==='models'){if(!MD_LOADED){loadModels();}else{renderModels();}return;}
   if(name==='server'){loadServer();return;}
 }
 
@@ -4070,7 +4222,184 @@ function refreshActive(){
 setInterval(function(){
   if(document.getElementById('auto').checked&&!document.hidden){refreshActive();}
 },4000);
-switchTab('clients');
+
+// ================================================================ 模型广场
+
+var MD_STATE=[],MD_LOADED=false;
+
+function mdBrand(name){
+  // g = 家族几何标记（用符号而非商标图形，规避版权）
+  var brands=[[/claude|anthropic/i,'#c2410c','C','✳'],[/gpt|openai|o[134]/i,'#0f766e','G','⬡'],
+    [/gemini|google/i,'#1d4ed8','\u2726'],[/deepseek/i,'#1e40af','D','≋'],
+    [/glm|zhipu|\u667a\u8c31/i,'#4338ca','Z'],[/qwen|\u901a\u4e49|ali/i,'#7c3aed','Q'],
+    [/kimi|moonshot/i,'#0f172a','K','◑'],[/grok|xai/i,'#111827','X','✕'],[/doubao|\u8c46\u5305/i,'#0369a1','V']];
+  for(var i=0;i<brands.length;i++){
+    if(brands[i][0].test(name)) return {c:brands[i][1],l:brands[i][2],g:brands[i][3]}; }
+  var ch=(String(name||'?').trim()[0]||'?').toUpperCase();
+  return {c:'#475569', l:ch, g:ch};
+}
+
+function mdMedian(nums){
+  if(!nums.length) return 0;
+  var a=nums.slice().sort(function(x,y){return x-y;});
+  var m=Math.floor(a.length/2);
+  return a.length%2?a[m]:(a[m-1]+a[m])/2;
+}
+
+function mdFmt(n){
+  n=Number(n||0);
+  if(n>=1e6) return (n/1e6).toFixed(1)+'M';
+  if(n>=1e3) return (n/1e3).toFixed(1)+'k';
+  return String(Math.round(n));
+}
+
+async function loadModels(){
+  var msg=document.getElementById('md-msg');
+  msg.textContent='读取中…';
+  try{
+    var st=await api('GET','/api/state');
+    var rq={entries:[]};
+    try{ rq=await api('GET','/api/requests?limit=2000'); }catch(e){}
+    var map={};
+    function rec(name){
+      if(!map[name]) map[name]={name:name,channels:{},groups:{},protocols:{},
+        pin:Infinity,pout:Infinity,cache:false,peak:false,longctx:false,on:true,
+        calls:0,ok:0,tin:0,tout:0,speeds:[]};
+      return map[name];
+    }
+    (st.keys||[]).forEach(function(k){
+      (k.models||[]).forEach(function(m){
+        var r=rec(m);
+        if(!r.icon && k.icon) r.icon=k.icon;
+        r.channels[k.label||k.key_id||'']=1;
+        if(k.group) r.groups[k.group]=1;
+        if(k.protocol) r.protocols[k.protocol]=1;
+        var pin=Number(k.price_in_per_1k||0), pout=Number(k.price_out_per_1k||0);
+        if(pin>0){ r.pin=Math.min(r.pin,pin); r.cache=true; }
+        if(pout>0) r.pout=Math.min(r.pout,pout);
+        if((k.peak_hours||[]).length) r.peak=true;
+        if(k.long_context_threshold>0) r.longctx=true;
+        if(k.enabled===false) r.on=false;
+      });
+    });
+    (rq.entries||[]).forEach(function(e){
+      if(!e.model) return;
+      var r=rec(e.model);
+      r.calls++; if(e.ok) r.ok++;
+      r.tin+=Number(e.tokens_in||0); r.tout+=Number(e.tokens_out||0);
+      var ms=Number(e.latency_ms||0), out=Number(e.tokens_out||0);
+      if(e.ok && ms>200 && out>0) r.speeds.push(out/(ms/1000));
+    });
+    MD_STATE=Object.keys(map).map(function(k){return map[k];});
+    MD_LOADED=true;
+    renderModels();
+    msg.textContent=MD_STATE.length+' 个模型 · '+((rq.entries||[]).length)+' 条请求';
+  }catch(e){ msg.textContent='读取失败：'+e.message; }
+}
+
+function renderModels(){
+  var box=document.getElementById('md-grid');
+  var q=(document.getElementById('md-q').value||'').trim().toLowerCase();
+  var sortKey=document.getElementById('md-sort').value;
+  var list=MD_STATE.filter(function(m){
+    if(!q) return true;
+    var hay=[m.name].concat(Object.keys(m.channels),Object.keys(m.groups)).join(' ').toLowerCase();
+    return hay.indexOf(q)>=0;
+  });
+  function speedOf(m){return mdMedian(m.speeds);}
+  function okOf(m){return m.calls?m.ok/m.calls:0;}
+  function priceOf(m){return (m.pin===Infinity?0:m.pin*1000)+(m.pout===Infinity?0:m.pout*1000);}
+  list.sort(function(a,b){
+    if(sortKey==='ok') return okOf(b)-okOf(a)||b.calls-a.calls;
+    if(sortKey==='speed') return speedOf(b)-speedOf(a);
+    if(sortKey==='price') return priceOf(a)-priceOf(b);
+    if(sortKey==='name') return a.name.localeCompare(b.name);
+    return b.calls-a.calls;
+  });
+  if(!list.length){ box.innerHTML='<p class="muted">没有匹配的模型</p>'; return; }
+  box.innerHTML=list.map(function(m){
+    var b=mdBrand(m.name);
+    var chips=[];
+    Object.keys(m.protocols).forEach(function(p){
+      chips.push('<span class="chip2">'+esc(p.replace('-messages','').replace('-chat','').replace('-api',''))+'</span>');});
+    Object.keys(m.groups).forEach(function(g){
+      if(g!=='default') chips.push('<span class="chip2">'+esc(g)+'</span>'); });
+    if(m.peak) chips.push('<span class="chip2">分时</span>');
+    if(m.longctx) chips.push('<span class="chip2">长上下文</span>');
+    var speed=speedOf(m);
+    var rate=m.calls?(okOf(m)*100).toFixed(1)+'%':'—';
+    var hasPrice=!(m.pin===Infinity&&m.pout===Infinity);
+    var priceHtml=hasPrice
+      ? '<div class="mprice">'
+        +'<div><span class="k">入</span><span class="v">'+(m.pin===Infinity?'0':(m.pin*1000).toFixed(2))+'</span><span class="u">元/百万</span></div>'
+        +'<div><span class="k">出</span><span class="v">'+(m.pout===Infinity?'0':(m.pout*1000).toFixed(2))+'</span><span class="u">元/百万</span></div>'
+        +'</div>'
+      : '<div class="mprice"><span class="u">未配置价格</span></div>';
+    var dot=m.on?'#2e9e6b':'#c3c8d0';
+    var ic=m.icon
+      ? '<img class="micon img" src="'+esc(m.icon)+'" alt="" loading="lazy">'
+      : '<div class="micon" style="background:'+b.c+'">'+b.g+'</div>';
+    return '<div class="mcard"><div class="mbody">'
+      +'<div class="mhead">'
+      + ic
+      +'<div style="min-width:0;flex:1">'
+      +'<div class="mname" title="'+esc(m.name)+'">'+esc(m.name)+'</div>'
+      +'<div class="msub">'+esc(Object.keys(m.channels).slice(0,2).join(' / ')||'未绑定渠道')+'</div>'
+      +'</div>'
+      +'<div class="mdot" style="background:'+dot+'" title="'+(m.on?'运行中':'已停用')+'"></div>'
+      +'</div>'
+      +(chips.length?'<div class="mchips">'+chips.join('')+'</div>':'')
+      +priceHtml
+      +(m.calls
+        ? '<div class="mstats">'
+          +'<div><b>'+speed.toFixed(1)+'</b><span>tok/s</span></div>'
+          +'<div><b>'+rate+'</b><span>成功率</span></div>'
+          +'<div><b>'+mdFmt(m.calls)+'</b><span>调用</span></div>'
+          +'</div>'
+        : '<div class="mstats empty">暂无调用数据</div>')
+      +'</div></div>';
+  }).join('');
+}
+
+document.getElementById('md-refresh').onclick=loadModels;
+document.getElementById('md-q').oninput=renderModels;
+document.getElementById('md-sort').onchange=renderModels;
+
+// ================================================================ 按权限隐藏页签
+// 客户端隐藏只是体验层，服务端照样按 scope 拦——但让没权限的人看见点不动的按钮同样糟糕。
+var TAB_SCOPES={
+  pool:'channel:read', tokens:'token:read', users:'user:read',
+  policy:'config:read', theme:'config:write', server:'config:read',
+  audit:'logs:read', plugins:'config:read', toip:'config:read',
+  newapi:'config:read', requests:'logs:read', usage:'usage:read',
+  clients:'logs:read', models:null
+};
+
+async function gateTabs(){
+  try{
+    var st=await api('GET','/api/state');
+    var scopes=st.scopes||[];
+    document.querySelectorAll('#tabs button').forEach(function(b){
+      var need=TAB_SCOPES[b.dataset.tab];
+      if(need && scopes.indexOf(need)<0){ b.style.display='none'; }
+    });
+    var active=document.querySelector('#tabs button.active');
+    if(!active||active.style.display==='none'){
+      var first=Array.prototype.filter.call(
+        document.querySelectorAll('#tabs button'),
+        function(b){return b.style.display!=='none';})[0];
+      if(first) switchTab(first.dataset.tab);
+    }
+  }catch(e){}
+}
+gateTabs();
+
+// 深链接：#models 直接打开对应页签（截图/分享都对得上）
+(function(){
+  var h=(location.hash||'').replace('#','');
+  if(h && document.querySelector('#tabs button[data-tab="'+h+'"]')) switchTab(h);
+  else switchTab('clients');
+})();
 </script>
 
 <script>

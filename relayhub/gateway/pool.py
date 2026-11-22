@@ -169,6 +169,10 @@ class UpstreamKey:
     # 与用户侧 cost_of 的语义一致：标价按空闲价填，峰时再乘。默认不启用（倍率 1.0）。
     peak_hours: list[int] = field(default_factory=list)
     peak_multiplier: float = 1.0
+    # 峰时只在这些星期生效（1=周一 … 7=周日）。空 = 每天生效（旧行为）。
+    # 厂商的峰谷几乎都是「仅工作日」：DeepSeek 是周一至周五，忽略这一维会让
+    # 周末按峰价记，成本直接翻倍。
+    peak_days: list[int] = field(default_factory=list)
     # 长上下文分档：输入 token 达到阈值后，整条请求按更高单价重算（OpenAI >272K 是
     # 输入 2×/输出 1.5×，Gemini >200K 是整体翻倍，xAI >200K 是 2×）。阈值 0 = 不分档。
     long_context_threshold: int = 0
@@ -176,6 +180,8 @@ class UpstreamKey:
     long_ctx_out_multiplier: float = 1.0
     price_in_per_1k: float = 0.0
     price_out_per_1k: float = 0.0
+    # 模型/厂商图标：URL 或 data URI（管理面显示用，不参与调用）。
+    icon: str = ""
     # 上游自己的价格接口（可选）。约定返回已换算好的「每 1k token」数字——
     # 各家格式不同，换算属于适配器的事，网关不猜。
     price_source: str = ""
@@ -244,9 +250,12 @@ class UpstreamKey:
         """按时间取峰时倍率。没配峰时、或 ts 缺失 → 1.0（不加价也不打折）。"""
         if not self.peak_hours or self.peak_multiplier <= 1.0 or ts is None:
             return 1.0
-        if time.localtime(ts).tm_hour in set(self.peak_hours):
-            return float(self.peak_multiplier)
-        return 1.0
+        local = time.localtime(ts)
+        if local.tm_hour not in set(self.peak_hours):
+            return 1.0
+        if self.peak_days and (local.tm_wday + 1) not in set(self.peak_days):
+            return 1.0   # 周末/非指定星期：按谷价
+        return float(self.peak_multiplier)
 
     def upstream_cost(self, tokens_in: int, tokens_out: int, ts: float | None = None) -> int:
         """本次转发在上游的成本估计（点，向上取整）。
@@ -297,12 +306,14 @@ class UpstreamKey:
             cost_multiplier=float(raw.get("cost_multiplier", 1.0) or 0.0),
             peak_hours=[int(h) for h in (raw.get("peak_hours") or []) if 0 <= int(h) <= 23],
             peak_multiplier=float(raw.get("peak_multiplier", 1.0) or 1.0),
+            peak_days=[int(d) for d in (raw.get("peak_days") or []) if 1 <= int(d) <= 7],
             long_context_threshold=int(raw.get("long_context_threshold", 0) or 0),
             long_ctx_in_multiplier=float(raw.get("long_ctx_in_multiplier", 1.0) or 1.0),
             long_ctx_out_multiplier=float(raw.get("long_ctx_out_multiplier", 1.0) or 1.0),
             price_in_per_1k=float(raw.get("price_in_per_1k", 0.0) or 0.0),
             price_out_per_1k=float(raw.get("price_out_per_1k", 0.0) or 0.0),
             price_source=str(raw.get("price_source") or ""),
+            icon=str(raw.get("icon") or ""),
             enabled=bool(raw.get("enabled", True)),
             note=str(raw.get("note", "")),
             auth_mode=str(raw.get("auth_mode") or AUTH_MODE_AUTO),

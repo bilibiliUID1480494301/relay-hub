@@ -149,3 +149,29 @@ def test_price_api_long_context_is_converted_to_multiplier() -> None:
         assert "除以 1000" in str(exc)
     else:
         raise AssertionError("应当拦住单位错误")
+
+
+def test_peak_multiplier_respects_weekdays() -> None:
+    """厂商的峰时几乎都是「仅工作日」：周末必须按谷价，否则成本翻倍。"""
+    import time as _time
+
+    from relayhub.gateway.pool import UpstreamKey
+
+    key = UpstreamKey(
+        key_id="k", label="t", base_url="http://up", api_key="x",
+        price_in_per_1k=0.001, price_out_per_1k=0.004,
+        peak_hours=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+        peak_multiplier=2.0, peak_days=[1, 2, 3, 4, 5],
+    )
+    # 本地时间当日：工作日的当前小时 → 2×；若今天是周末 → 1×
+    now = _time.time()
+    is_weekday = _time.localtime(now).tm_wday < 5
+    assert key.peak_multiplier_at(now) == (2.0 if is_weekday else 1.0)
+
+    # 不填 peak_days = 每天生效（旧行为，不能静默改变已有配置）
+    every_day = UpstreamKey(
+        key_id="k2", label="t", base_url="http://up", api_key="x",
+        price_in_per_1k=0.001, peak_hours=[_time.localtime(now).tm_hour],
+        peak_multiplier=2.0,
+    )
+    assert every_day.peak_multiplier_at(now) == 2.0
