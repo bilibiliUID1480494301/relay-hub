@@ -1471,6 +1471,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._error(400, "缺少设备名 name")
                 return
             models = [m.strip() for m in str(body.get("models_text") or "").split(",") if m.strip()]
+            ip_allow = [
+                x.strip() for x in re.split(r"[,\s]+", str(body.get("ip_text") or ""))
+                if x.strip()
+            ]
             scope = str(body.get("scope") or "normal")
             if scope not in ("normal", "test"):
                 self._error(400, f"未知 scope {scope!r}，可选 normal / test")
@@ -1491,6 +1495,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                         name=name,
                         token=secret,
                         models=tuple(models),
+                        ip_allowlist=tuple(ip_allow),
                         scope=scope,
                         rpm=rpm,
                         daily_requests=daily,
@@ -1510,6 +1515,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 name=name,
                 token_hint=key_hint(secret),
                 models=models,
+                ip_allowlist=ip_allow,
                 scope=scope,
                 rpm=rpm,
                 daily_requests=daily,
@@ -1572,6 +1578,14 @@ class AdminHandler(BaseHTTPRequestHandler):
                     m.strip() for m in str(body["models_text"] or "").split(",") if m.strip()
                 )
                 changed.append(f"models={','.join(record.models) or '(不限)'}")
+            if "ip_text" in body:
+                # IP 白名单：一行一个，也认逗号分隔；空 = 不限（恢复全放行）。
+                record.ip_allowlist = tuple(
+                    x.strip()
+                    for x in re.split(r"[,\s]+", str(body["ip_text"] or ""))
+                    if x.strip()
+                )
+                changed.append(f"ip_allowlist={len(record.ip_allowlist)}条")
             if changed:
                 pool.save(tokens_path)
                 # 只动 enabled 时沿用历史事件名 token.toggle（既有审计/测试的契约）；

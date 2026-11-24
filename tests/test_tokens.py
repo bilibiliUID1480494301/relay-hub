@@ -281,3 +281,33 @@ def test_group_normalized_and_persisted() -> None:
     assert raw["group"] == "vip"
     assert DT.from_dict(raw).group == "vip"
     assert DT.from_dict({"token_id": "e", "name": "e"}).group == "default"
+
+
+def test_ip_allowlist_matches_single_ip_and_cidr() -> None:
+    """白名单支持单 IP 与 CIDR；空名单放行；解析不出的来源拒绝（宁可误杀）。"""
+    from relayhub.gateway.tokens import DownstreamToken
+
+    tok = DownstreamToken(
+        token_id="t1", name="dev", token="sk-x",
+        ip_allowlist=("10.0.0.5", "192.168.1.0/24", "::1"),
+    )
+    assert tok.ip_allowed("10.0.0.5")
+    assert tok.ip_allowed("192.168.1.77")
+    assert tok.ip_allowed("::1")
+    assert not tok.ip_allowed("10.0.0.6")
+    assert not tok.ip_allowed("8.8.8.8")
+    assert not tok.ip_allowed("")            # 解析不出 → 拒绝
+
+    # 反代常见 IPv4-mapped IPv6
+    assert tok.ip_allowed("::ffff:10.0.0.5")
+
+    free = DownstreamToken(token_id="t2", name="any", token="sk-y")
+    assert free.ip_allowed("1.2.3.4")        # 空名单 = 不限制
+
+    # 写错的条目被跳过，不会变成「全放行」
+    sloppy = DownstreamToken(
+        token_id="t3", name="s", token="sk-z",
+        ip_allowlist=("not-an-ip", "10.1.0.0/16"),
+    )
+    assert sloppy.ip_allowed("10.1.2.3")
+    assert not sloppy.ip_allowed("10.2.0.1")

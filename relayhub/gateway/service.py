@@ -2044,6 +2044,17 @@ class RelayHandler(BaseHTTPRequestHandler):
                         dialect,
                     )
                     return False, None
+                # IP 白名单（对标 new-api）：令牌级别收窄来源，403 而不是 401——
+                # 凭证是对的，只是不许从这个地址用。
+                ip = self._client_ip()
+                if not match.ip_allowed(ip):
+                    self._error(
+                        403,
+                        f"令牌 {match.name} 不允许从 {ip or '未知来源'} 访问",
+                        "permission_error",
+                        dialect,
+                    )
+                    return False, None
                 return True, match
         if self.api_key and hmac.compare_digest(supplied, self.api_key):
             return True, None

@@ -95,6 +95,22 @@ class TokenUsage:
         self.tokens_out += max(0, int(tokens_out))
 
 
+def _client_ip_networks(entries: tuple[str, ...]) -> list:
+    """把白名单条目解析成 ip_network 列表；坏条目跳过（不因为一条写错就全放行）。"""
+    import ipaddress
+
+    nets = []
+    for raw in entries:
+        item = str(raw or "").strip()
+        if not item:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
 @dataclass
 class DownstreamToken:
     token_id: str
@@ -103,6 +119,9 @@ class DownstreamToken:
     enabled: bool = True
     # 允许使用的模型；空 = 不限制。对标 one-api 令牌的「可用模型」范围。
     models: tuple[str, ...] = ()
+    # 来源 IP 白名单：单 IP 或 CIDR，空 = 不限制（对标 new-api 令牌的 IP 白名单）。
+    # 只是第一道闸：反代/CDN 后面要配合可信头取真实来源，否则白名单形同虚设。
+    ip_allowlist: tuple[str, ...] = ()
     # 作用域（SCOPE_NORMAL / SCOPE_TEST）。test=合成应答，见 service.TestRouter。
     scope: str = SCOPE_NORMAL
     # 限额。0 = 不限。rpm=每分钟请求数（滑动窗口，进程内计数）；
@@ -140,6 +159,22 @@ class DownstreamToken:
         if self.token and not self.token_hint:
             self.token_hint = token_hint_of(self.token)
 
+    def ip_allowed(self, ip: str) -> bool:
+        """白名单为空 → 放行；解析不出的来源 IP → 拒绝（宁可误杀，不放过）。"""
+        nets = _client_ip_networks(self.ip_allowlist)
+        if not nets:
+            return True
+        import ipaddress
+
+        try:
+            addr = ipaddress.ip_address(str(ip or "").strip())
+        except ValueError:
+            return False
+        # 反代常见：::ffff:1.2.3.4，按 v4 比对
+        if getattr(addr, "ipv4_mapped", None):
+            addr = addr.ipv4_mapped
+        return any(addr in net for net in nets)
+
     def is_expired(self, now: float | None = None) -> bool:
         return bool(self.expires_at) and (now or time.time()) > self.expires_at
 
@@ -161,6 +196,7 @@ class DownstreamToken:
             token=str(raw.get("token", "")),
             enabled=bool(raw.get("enabled", True)),
             models=tuple(str(m) for m in (raw.get("models") or ())),
+            ip_allowlist=tuple(str(x) for x in (raw.get("ip_allowlist") or ())),
             # 未知 scope（旧文件/手改坏）回退 normal，别让一份脏文件卡死整个网关
             scope=str(raw.get("scope")) if raw.get("scope") in SCOPES else SCOPE_NORMAL,
             rpm=int(raw.get("rpm", 0) or 0),
