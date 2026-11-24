@@ -311,3 +311,27 @@ def test_ip_allowlist_matches_single_ip_and_cidr() -> None:
     )
     assert sloppy.ip_allowed("10.1.2.3")
     assert not sloppy.ip_allowed("10.2.0.1")
+
+
+def test_token_quota_counts_both_directions() -> None:
+    """令牌额度按 tokens_in + tokens_out 计；0 = 不限；用尽即拒。"""
+    from relayhub.gateway.tokens import DownstreamToken
+
+    tok = DownstreamToken(token_id="q1", name="friend", token="sk-q", quota_tokens=1000)
+    assert tok.quota_left() == 1000 and not tok.quota_exhausted()
+    tok.usage.tokens_in, tok.usage.tokens_out = 700, 200
+    assert tok.quota_left() == 100          # 900 已用
+    assert not tok.quota_exhausted()
+    tok.usage.tokens_out = 300
+    assert tok.quota_left() == 0 and tok.quota_exhausted()
+
+    free = DownstreamToken(token_id="q2", name="free", token="sk-f")
+    assert free.quota_left() == -1 and not free.quota_exhausted()
+
+    # 负数在构造时就该被拒
+    try:
+        DownstreamToken(token_id="q3", name="bad", token="sk-b", quota_tokens=-5)
+    except Exception:
+        pass
+    else:
+        raise AssertionError("负额度应当报错")

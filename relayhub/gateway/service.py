@@ -2044,6 +2044,16 @@ class RelayHandler(BaseHTTPRequestHandler):
                         dialect,
                     )
                     return False, None
+                # 令牌级额度：用完就拒，403。用 402 更贴切但客户端常把它当支付错误，
+                # 403 至少能让人去看「这把 key 的额度」。
+                if match.quota_exhausted():
+                    self._error(
+                        403,
+                        f"令牌 {match.name} 的额度已用尽（{match.quota_tokens} tokens）",
+                        "permission_error",
+                        dialect,
+                    )
+                    return False, None
                 # IP 白名单（对标 new-api）：令牌级别收窄来源，403 而不是 401——
                 # 凭证是对的，只是不许从这个地址用。
                 ip = self._client_ip()
@@ -2438,7 +2448,20 @@ class RelayHandler(BaseHTTPRequestHandler):
             authorized, identity = self._authenticate()
             if not authorized:
                 return
-            self._send_json(200, self.usage_for(identity))
+            if identity is not None and not getattr(identity, "allow_self_query", True):
+                self._error(
+                    403,
+                    f"令牌 {identity.name} 不允许自查用量",
+                    "permission_error",
+                )
+                return
+            payload = self.usage_for(identity)
+            if identity is not None:
+                # 令牌级额度：和用户余额分开报，前端才分得清「钱没花完但 key 的额度用完了」
+                payload["token_quota"] = int(getattr(identity, "quota_tokens", 0) or 0)
+                payload["token_quota_left"] = int(identity.quota_left())
+                payload["token_expires_at"] = float(getattr(identity, "expires_at", 0.0) or 0.0)
+            self._send_json(200, payload)
             return
         if path != "/v1/models":
             self._error(404, f"未知路径 {self.path.split('?')[0]}", "not_found_error")

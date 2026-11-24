@@ -119,6 +119,12 @@ class DownstreamToken:
     enabled: bool = True
     # 允许使用的模型；空 = 不限制。对标 one-api 令牌的「可用模型」范围。
     models: tuple[str, ...] = ()
+    # 令牌级额度（token 数，0 = 不限）。用户余额管"谁付钱"，这里管"这把钥匙
+    # 最多能用多少"——发给别人的 key 能封顶，泄露也刷不穿。
+    quota_tokens: int = 0
+    # 是否允许这把令牌自查用量与剩余额度（/v1/usage）。默认开，关掉是为了
+    # 不让泄露的 key 先探余额再决定刷多少。
+    allow_self_query: bool = True
     # 来源 IP 白名单：单 IP 或 CIDR，空 = 不限制（对标 new-api 令牌的 IP 白名单）。
     # 只是第一道闸：反代/CDN 后面要配合可信头取真实来源，否则白名单形同虚设。
     ip_allowlist: tuple[str, ...] = ()
@@ -150,7 +156,7 @@ class DownstreamToken:
     def __post_init__(self) -> None:
         if self.scope not in SCOPES:
             raise TokenError(f"未知 scope {self.scope!r}，可选 {SCOPES}")
-        if self.rpm < 0 or self.daily_requests < 0:
+        if self.rpm < 0 or self.daily_requests < 0 or self.quota_tokens < 0:
             raise TokenError("限额不能为负数（0 = 不限）")
         self.group = _normalize_group(self.group)
         # 自动补哈希与提示（新建 / 旧文件迁移都在这里收口）
@@ -158,6 +164,16 @@ class DownstreamToken:
             self.token_hash = hash_token(self.token)
         if self.token and not self.token_hint:
             self.token_hint = token_hint_of(self.token)
+
+    def quota_left(self) -> int:
+        """剩余可用 token；-1 = 不限。"""
+        if self.quota_tokens <= 0:
+            return -1
+        used = int(self.usage.tokens_in) + int(self.usage.tokens_out)
+        return max(0, self.quota_tokens - used)
+
+    def quota_exhausted(self) -> bool:
+        return self.quota_tokens > 0 and self.quota_left() <= 0
 
     def ip_allowed(self, ip: str) -> bool:
         """白名单为空 → 放行；解析不出的来源 IP → 拒绝（宁可误杀，不放过）。"""
@@ -197,6 +213,8 @@ class DownstreamToken:
             enabled=bool(raw.get("enabled", True)),
             models=tuple(str(m) for m in (raw.get("models") or ())),
             ip_allowlist=tuple(str(x) for x in (raw.get("ip_allowlist") or ())),
+            quota_tokens=int(raw.get("quota_tokens", 0) or 0),
+            allow_self_query=bool(raw.get("allow_self_query", True)),
             # 未知 scope（旧文件/手改坏）回退 normal，别让一份脏文件卡死整个网关
             scope=str(raw.get("scope")) if raw.get("scope") in SCOPES else SCOPE_NORMAL,
             rpm=int(raw.get("rpm", 0) or 0),

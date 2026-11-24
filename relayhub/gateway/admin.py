@@ -1481,6 +1481,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             try:
                 rpm = max(0, int(body.get("rpm") or 0))
+                quota_tokens = max(0, int(body.get("quota_tokens") or 0))
                 daily = max(0, int(body.get("daily_requests") or 0))
                 days = max(0, int(body.get("days") or 0))
             except (TypeError, ValueError):
@@ -1498,6 +1499,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                         ip_allowlist=tuple(ip_allow),
                         scope=scope,
                         rpm=rpm,
+                        quota_tokens=quota_tokens,
+                        allow_self_query=bool(body.get("allow_self_query", True)),
                         daily_requests=daily,
                         expires_at=(time.time() + days * 86400) if days > 0 else 0.0,
                         note=str(body.get("note") or ""),
@@ -1578,6 +1581,12 @@ class AdminHandler(BaseHTTPRequestHandler):
                     m.strip() for m in str(body["models_text"] or "").split(",") if m.strip()
                 )
                 changed.append(f"models={','.join(record.models) or '(不限)'}")
+            if "quota_tokens" in body:
+                record.quota_tokens = max(0, int(body.get("quota_tokens") or 0))
+                changed.append(f"quota_tokens={record.quota_tokens}")
+            if "allow_self_query" in body:
+                record.allow_self_query = bool(body.get("allow_self_query"))
+                changed.append(f"allow_self_query={record.allow_self_query}")
             if "ip_text" in body:
                 # IP 白名单：一行一个，也认逗号分隔；空 = 不限（恢复全放行）。
                 record.ip_allowlist = tuple(
@@ -2966,7 +2975,9 @@ tbody tr:hover td{ background:var(--accent-soft); }
     </select></label>
     <label>RPM <input id="t-rpm" type="number" min="0" step="1" placeholder="0=不限"></label>
     <label>日配额 <input id="t-daily" type="number" min="0" step="1" placeholder="0=不限"></label>
+    <label>额度(tokens) <input id="t-quota" type="number" min="0" step="1" placeholder="0=不限"></label>
     <label>有效期(天) <input id="t-days" type="number" min="0" step="1" placeholder="0=永久"></label>
+    <label style="flex:0 0 auto"><input type="checkbox" id="t-selfquery" checked style="height:auto"> 允许自查用量</label>
     <label>备注 <input id="t-note"></label>
     <button id="t-add">发放</button>
     <button class="ghost" id="t-cancel" hidden>取消编辑</button>
@@ -3860,6 +3871,8 @@ document.getElementById('t-add').onclick=function(){
     models_text:document.getElementById('t-models').value,
     scope:document.getElementById('t-scope').value,
     rpm:parseInt(document.getElementById('t-rpm').value,10)||0,
+    quota_tokens:parseInt(document.getElementById('t-quota').value,10)||0,
+    allow_self_query:document.getElementById('t-selfquery').checked,
     daily_requests:parseInt(document.getElementById('t-daily').value,10)||0,
     days:parseInt(document.getElementById('t-days').value,10)||0,
     note:document.getElementById('t-note').value.trim()
@@ -3898,6 +3911,8 @@ document.getElementById('t-rows').onclick=function(ev){
     document.getElementById('t-models').value=(rec.models||[]).join(',');
     document.getElementById('t-scope').value=rec.scope||'normal';
     document.getElementById('t-rpm').value=rec.rpm||0;
+    document.getElementById('t-quota').value=rec.quota_tokens||0;
+    document.getElementById('t-selfquery').checked=rec.allow_self_query!==false;
     document.getElementById('t-daily').value=rec.daily_requests||0;
     document.getElementById('t-days').value=0;
     document.getElementById('t-note').value=rec.note||'';
