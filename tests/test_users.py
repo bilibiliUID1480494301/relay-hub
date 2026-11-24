@@ -296,3 +296,50 @@ def test_legacy_user_file_defaults_channel_and_role() -> None:
     user = User.from_dict(raw)
     assert user.role == "user"
     assert user.channel == "web"
+
+
+def test_user_creates_and_manages_own_keys(panel_relay) -> None:
+    """自助密钥：用户自己建（额度/有效期/模型自选）、停用、删除，且碰不到别人的。"""
+    server, _ = panel_relay
+    base = server.base_url
+
+    status, body, headers = _call(base, "/api/auth/register", {"username": "ann", "password": "password8"})
+    assert status == 200 and body["ok"], body
+    sid = headers["Set-Cookie"].split("rh_session=")[1].split(";")[0]
+
+    # 建：额度 1000、7 天、只放行两个模型
+    status, got, _ = _call(
+        base, "/api/user/tokens",
+        {"name": "手机", "quota_tokens": 1000, "days": 7,
+         "models_text": "demo-a, demo-b", "allow_self_query": False},
+        cookie=sid,
+    )
+    assert status == 200 and got["ok"], got
+    assert got["token"].startswith("rht_")          # 本站令牌前缀
+    # 注册时已自动发一把 user-ann，这里按名字挑出刚建的那把
+    item = next(x for x in got["tokens"] if x["name"] == "手机")
+    assert item["name"] == "手机" and item["quota_tokens"] == 1000
+    assert item["expires_at"] > time.time()
+    assert item["allow_self_query"] is False
+    assert item["quota_left"] == 1000
+
+    # 列表：明文不该出现
+    status, listed, _ = _call(base, "/api/user/tokens", cookie=sid)
+    assert got["token"] not in json.dumps(listed, ensure_ascii=False), "列表不该回明文"
+
+    # 停用
+    token_id = item["token_id"]
+    status, upd, _ = _call(base, "/api/user/tokens/update", {"token_id": token_id, "enabled": False}, cookie=sid)
+    mine = next(x for x in upd["tokens"] if x["token_id"] == token_id)
+    assert status == 200 and mine["enabled"] is False
+
+    # 别人删不掉：另开一个账号试同一 id
+    status, other, headers2 = _call(base, "/api/auth/register", {"username": "bob", "password": "password8"})
+    assert status == 200 and other["ok"], other
+    sid2 = headers2["Set-Cookie"].split("rh_session=")[1].split(";")[0]
+    status, denied, _ = _call(base, "/api/user/tokens/delete", {"token_id": token_id}, cookie=sid2)
+    assert status == 404, denied
+
+    # 本人删：从列表消失
+    status, gone, _ = _call(base, "/api/user/tokens/delete", {"token_id": token_id}, cookie=sid)
+    assert status == 200 and all(x["token_id"] != token_id for x in gone["tokens"])

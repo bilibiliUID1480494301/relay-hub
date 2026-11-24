@@ -48,7 +48,7 @@ from . import toip as toip_module
 from .router import RelayOutcome, RouterError
 
 ident_module = None  # 未安装客户端扩展包时的占位：身份头整段跳过
-from .tokens import SCOPE_TEST, DownstreamToken, TokenStore, generate_token
+from .tokens import SCOPE_TEST, DownstreamToken, TokenStore, generate_token, TokenError
 from .upstream import (
     UpstreamError,
     cache_from_usage,
@@ -1147,8 +1147,31 @@ function panelExtras(u){
   var out='<h3>可用模型</h3><p class="sub">'+((u.models||[]).join('、')||'（暂无）')+'</p>';
   var ks=(u.keys||[]);
   out+='<h3>我的密钥</h3>';
-  if(ks.length){out+='<table>'+ks.map(function(k){return '<tr><td>'+esc(k.name)+'</td><td class="mono">'+esc(k.hint||'—')+'</td><td>'+(k.enabled?'启用':'停用')+'</td><td>'+(k.channel_group?('组 '+esc(k.channel_group)):'全组')+'</td></tr>';}).join('')+'</table>';}
-  else{out+='<p class="sub">（无）</p>';}
+  out+='<p class="sub">每把密钥可以单独设额度、有效期、可用模型与来源 IP；额度用尽或过期即停用。</p>';
+  if(ks.length){
+    out+='<table><tr><th>名称</th><th>密钥</th><th>额度</th><th>有效期</th><th>状态</th><th></th></tr>'+
+      ks.map(function(k){
+        var quota=(k.quota_tokens>0)?('<span class="mono">'+k.used+' / '+k.quota_tokens+'</span>'):'不限';
+        var exp=k.expires_at?new Date(k.expires_at*1000).toLocaleDateString():'永久';
+        return '<tr><td>'+esc(k.name)+'</td><td class="mono">'+esc(k.hint||'—')+'</td><td>'+quota+'</td><td>'+exp+'</td><td>'+(k.enabled?'启用':'停用')+'</td>'
+          +'<td style="white-space:nowrap">'
+          +'<button class="ghost" data-id="'+k.token_id+'" data-next="'+(!k.enabled)+'" onclick="toggleKey(this)">'+(k.enabled?'停用':'启用')+'</button> '
+          +'<button class="ghost" data-id="'+k.token_id+'" data-name="'+esc(k.name)+'" onclick="delKey(this)">删除</button>'
+          +'</td></tr>';
+      }).join('')+'</table>';
+  } else { out+='<p class="sub">（还没有密钥）</p>'; }
+  if((ks.length)<(u.key_limit||20)){
+    out+='<div class="row" style="margin-top:10px">'
+      +'<label>名称 <input id="k-name" placeholder="手机 / 平板 / 某工具"></label>'
+      +'<label>额度(tokens) <input id="k-quota" type="number" min="0" placeholder="0=不限"></label>'
+      +'<label>有效期(天) <input id="k-days" type="number" min="0" placeholder="0=永久"></label>'
+      +'<label>模型限制 <input id="k-models" placeholder="逗号分隔；留空=不限"></label>'
+      +'<label>IP 白名单 <input id="k-ip" placeholder="一行一个；留空=不限"></label>'
+      +'<label style="flex:0 0 auto"><input type="checkbox" id="k-self" checked style="height:auto"> 允许自查</label>'
+      +'<button onclick="createKey()">新建密钥</button></div>';
+  } else {
+    out+='<p class="sub">已达上限 '+(u.key_limit||20)+' 把，删掉不用的再建。</p>';
+  }
   var rc=(u.recent||[]);
   out+='<h3>最近消费</h3>';
   if(rc.length){out+='<table><tr><th>时间</th><th>模型</th><th>状态</th><th>tokens</th><th>扣点</th></tr>'+
@@ -1159,6 +1182,28 @@ function panelExtras(u){
 async function doRedeem(){err('');var j=await api('/api/user/redeem',{code:document.getElementById('code').value.trim()});
   if(!j.ok){err(j.error);return;}
   document.getElementById('msg').textContent='+'+j.credits+' 点，当前余额 '+j.quota;refresh();}
+async function createKey(){
+  var body={name:(document.getElementById('k-name').value||'').trim(),
+    quota_tokens:parseInt(document.getElementById('k-quota').value,10)||0,
+    days:parseInt(document.getElementById('k-days').value,10)||0,
+    models_text:document.getElementById('k-models').value,
+    ip_text:document.getElementById('k-ip').value,
+    allow_self_query:document.getElementById('k-self').checked};
+  if(!body.name){alert('请填名称');return;}
+  var j=await api('/api/user/tokens',body);
+  if(!j.ok){alert(j.error||'创建失败');return;}
+  showKey(j.token);
+}
+async function toggleKey(el){
+  var j=await api('/api/user/tokens/update',{token_id:el.dataset.id,enabled:el.dataset.next==='true'});
+  if(!j.ok){alert(j.error||'操作失败');return;} refresh();
+}
+async function delKey(el){
+  var name=el.dataset.name||'这把密钥';
+  if(!confirm('删除「'+name+'」？该密钥立即失效，无法恢复。'))return;
+  var j=await api('/api/user/tokens/delete',{token_id:el.dataset.id});
+  if(!j.ok){alert(j.error||'删除失败');return;} refresh();
+}
 async function doRotate(){if(!confirm('旧 Key 立即失效，确定？'))return;
   var j=await api('/api/user/rotate-key',{});if(j.ok){showKey(j.token);refresh();}}
 function showKey(t){h('<h2>你的新 API Key</h2><p class="sub">只显示这一次，立即复制保存</p>'+
@@ -1169,6 +1214,11 @@ refresh();
 
 
 # ---------------------------------------------------------------- HTTP 层
+
+
+def _token_hint(secret: str) -> str:
+    """尾 4 位提示，与 admin.key_hint 同语义。service 不反向依赖 admin 模块。"""
+    return f"…{secret[-4:]}" if secret and len(secret) >= 4 else "…"
 
 
 class RelayHandler(BaseHTTPRequestHandler):
@@ -1541,6 +1591,18 @@ class RelayHandler(BaseHTTPRequestHandler):
             if path == "/api/user/rotate-key":
                 api_key = self._issue_user_api_key(user)
                 self._send_json(200, {"ok": True, "token": api_key})
+                return
+            # ---- 自助密钥管理（创建 / 修改 / 删除都由用户自己做） ----
+            # 必须放在下面 required-scope 的兜底之前：兜底默认按 panel.view，
+            # 那条会让只读账号也能建密钥。
+            if path == "/api/user/tokens":
+                self._user_token_create(user)
+                return
+            if path == "/api/user/tokens/update":
+                self._user_token_update(user)
+                return
+            if path == "/api/user/tokens/delete":
+                self._user_token_delete(user)
                 return
             if path == "/api/user/redeem":
                 body = self._read_json() or {}
@@ -2314,6 +2376,9 @@ class RelayHandler(BaseHTTPRequestHandler):
             panel = panel.replace("</head>", _theme_vars(site_module.load_site(paths.site_path())) + "</head>", 1)
             self._send_html(panel + ANNOUNCEMENT_SCRIPT)
             return
+        if path == "/api/user/tokens":
+            self._user_tokens_list()
+            return
         if path == "/api/user/me":
             user = self._session_user()
             if user is None or self.users is None:
@@ -2340,13 +2405,9 @@ class RelayHandler(BaseHTTPRequestHandler):
                     "api_key_hint": api_key_hint,
                     "unlimited": bool(fresh and fresh.quota < 0),
                     # —— #20 面板增强：名下密钥 / 可见模型 / 本人消费明细 ——
-                    "keys": [
-                        {"name": t.name, "hint": t.token_hint, "enabled": t.enabled,
-                         "channel_group": t.channel_group}
-                        for t in (self.tokens.pool.tokens if self.tokens else [])
-                        if t.user_id == user.user_id
-                    ],
+                    "keys": [self._token_view(t) for t in self._own_tokens(user)],
                     "models": self._panel_models(user),
+                    "key_limit": self.USER_TOKEN_LIMIT,
                     **dict(zip(("recent", "usage"), self._panel_recent(user))),
                 },
             )
@@ -2539,6 +2600,157 @@ class RelayHandler(BaseHTTPRequestHandler):
             "expires_at": record.expires_at,
             "note": "明文只显示这一次，请立即保存",
         })
+
+    # ---- 自助密钥：用户建自己的 key，参数自己选（额度/有效期/模型/IP/自查） ----
+
+    USER_TOKEN_LIMIT = 20  # 单账号最多持有多少把，防刷爆索引
+
+    def _own_tokens(self, user: Any) -> list[Any]:
+        store = self.tokens
+        if store is None:
+            return []
+        return [t for t in store.pool.tokens if t.user_id == user.user_id]
+
+    def _token_view(self, t: Any) -> dict[str, Any]:
+        """给本人看的视图：**不含明文**，只有尾 4 位。"""
+        return {
+            "token_id": t.token_id,
+            "name": t.name,
+            "hint": t.token_hint,
+            "enabled": bool(t.enabled),
+            "models": list(t.models),
+            "quota_tokens": int(t.quota_tokens),
+            "quota_left": int(t.quota_left()),
+            "used": int(t.usage.tokens_in) + int(t.usage.tokens_out),
+            "expires_at": float(t.expires_at or 0.0),
+            "ip_allowlist": list(t.ip_allowlist),
+            "allow_self_query": bool(t.allow_self_query),
+            "rpm": int(t.rpm),
+            "created_at": float(t.created_at or 0.0),
+        }
+
+    def _user_tokens_list(self) -> None:
+        user = self._session_user()
+        if user is None:
+            self._send_json(401, {"ok": False, "error": "请先登录"})
+            return
+        items = [self._token_view(t) for t in self._own_tokens(user)]
+        items.sort(key=lambda x: x["created_at"])
+        self._send_json(200, {"ok": True, "tokens": items, "limit": self.USER_TOKEN_LIMIT})
+
+    def _user_token_create(self, user: Any) -> None:
+        body = self._read_json() or {}
+        name = str(body.get("name") or "").strip()
+        if not name:
+            self._send_json(400, {"ok": False, "error": "请填写密钥名称"})
+            return
+        if len(self._own_tokens(user)) >= self.USER_TOKEN_LIMIT:
+            self._send_json(
+                409, {"ok": False, "error": f"每人最多 {self.USER_TOKEN_LIMIT} 把密钥，请先删掉不用的"}
+            )
+            return
+        try:
+            quota = max(0, int(body.get("quota_tokens") or 0))
+            days = max(0, int(body.get("days") or 0))
+            rpm = max(0, int(body.get("rpm") or 0))
+        except (TypeError, ValueError):
+            self._send_json(400, {"ok": False, "error": "额度/有效期/RPM 必须是非负整数"})
+            return
+        models = [m.strip() for m in str(body.get("models_text") or "").split(",") if m.strip()]
+        ips = [x.strip() for x in str(body.get("ip_text") or "").replace("\r", "\n").splitlines() if x.strip()]
+        secret = generate_token()
+        record = DownstreamToken(
+            token_id=str(uuid.uuid4()),
+            name=name,
+            token=secret,
+            models=tuple(models),
+            quota_tokens=quota,
+            rpm=rpm,
+            expires_at=(time.time() + days * 86400) if days > 0 else 0.0,
+            user_id=user.user_id,
+            allow_self_query=bool(body.get("allow_self_query", True)),
+            ip_allowlist=tuple(ips),
+            note=f"panel:{user.username}",
+        )
+        self.tokens.mutate(lambda pool: pool.add(record))
+        audit_module.record(
+            "panel.token.add",
+            path=paths.audit_path(),
+            username=user.username,
+            name=name,
+            token_hint=_token_hint(secret),
+            quota_tokens=quota,
+        )
+        # 明文只此一次；列表永远只有尾 4 位
+        self._send_json(200, {"ok": True, "token": secret, "tokens": [self._token_view(t) for t in self._own_tokens(user)]})
+
+    def _user_token_update(self, user: Any) -> None:
+        body = self._read_json() or {}
+        token_id = str(body.get("token_id") or "")
+        own = {t.token_id for t in self._own_tokens(user)}
+        if token_id not in own:
+            # 别人的 key 与不存在给同一个回答：不泄露「这个 id 存在但不是你的」
+            self._send_json(404, {"ok": False, "error": "找不到这把密钥"})
+            return
+        changed: list[str] = []
+
+        def change(pool: Any) -> None:
+            rec = next((x for x in pool.tokens if x.token_id == token_id), None)
+            if rec is None:
+                raise TokenError("找不到这把密钥")
+            if "enabled" in body:
+                rec.enabled = bool(body.get("enabled"))
+                changed.append(f"enabled={rec.enabled}")
+            if "quota_tokens" in body:
+                rec.quota_tokens = max(0, int(body.get("quota_tokens") or 0))
+                changed.append(f"quota_tokens={rec.quota_tokens}")
+            if "allow_self_query" in body:
+                rec.allow_self_query = bool(body.get("allow_self_query"))
+                changed.append(f"allow_self_query={rec.allow_self_query}")
+            if "models_text" in body:
+                rec.models = tuple(
+                    m.strip() for m in str(body.get("models_text") or "").split(",") if m.strip()
+                )
+                changed.append(f"models={len(rec.models)}")
+            if "ip_text" in body:
+                rec.ip_allowlist = tuple(
+                    x.strip()
+                    for x in str(body.get("ip_text") or "").splitlines()
+                    if x.strip()
+                )
+                changed.append(f"ip_allowlist={len(rec.ip_allowlist)}")
+            if "days" in body:
+                days = max(0, int(body.get("days") or 0))
+                rec.expires_at = (time.time() + days * 86400) if days > 0 else 0.0
+                changed.append(f"days={days}")
+
+        try:
+            self.tokens.mutate(change)
+        except (TokenError, ValueError) as exc:
+            self._send_json(409, {"ok": False, "error": str(exc)})
+            return
+        if changed:
+            audit_module.record(
+                "panel.token.update", path=paths.audit_path(), username=user.username,
+                token_hint=next((t.token_hint for t in self._own_tokens(user) if t.token_id == token_id), ""),
+                changed=changed,
+            )
+        self._send_json(200, {"ok": True, "tokens": [self._token_view(t) for t in self._own_tokens(user)]})
+
+    def _user_token_delete(self, user: Any) -> None:
+        body = self._read_json() or {}
+        token_id = str(body.get("token_id") or "")
+        target = next((t for t in self._own_tokens(user) if t.token_id == token_id), None)
+        if target is None:
+            self._send_json(404, {"ok": False, "error": "找不到这把密钥"})
+            return
+        hint = target.token_hint
+        self.tokens.mutate(lambda pool: pool.remove(token_id))
+        audit_module.record(
+            "panel.token.delete", path=paths.audit_path(),
+            username=user.username, token_hint=hint,
+        )
+        self._send_json(200, {"ok": True, "tokens": [self._token_view(t) for t in self._own_tokens(user)]})
 
     def _user_usage(self) -> None:
         """用户自查各客户端用量。
