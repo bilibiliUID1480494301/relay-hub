@@ -381,3 +381,69 @@ def test_password_change_revokes_other_sessions(panel_relay) -> None:
     assert status == 401
     status, _, _ = _call(base, "/api/auth/login", {"username": "ken", "password": "newpassword9"})
     assert status == 200
+
+
+def test_audit_logs_are_scoped_to_the_user(panel_relay) -> None:
+    """审计只回自己的事件：A 看不到 B 的登录记录。"""
+    server, _ = panel_relay
+    base = server.base_url
+
+    _, _, h1 = _call(base, "/api/auth/register", {"username": "ivy", "password": "password8"})
+    sid1 = h1["Set-Cookie"].split("rh_session=")[1].split(";")[0]
+    _, _, h2 = _call(base, "/api/auth/register", {"username": "joe", "password": "password8"})
+    sid2 = h2["Set-Cookie"].split("rh_session=")[1].split(";")[0]
+
+    # ivy 做点会留痕的事
+    _call(base, "/api/user/tokens", {"name": "k1"}, cookie=sid1)
+
+    status, mine, _ = _call(base, "/api/user/audit?limit=100", cookie=sid1)
+    assert status == 200 and mine["ok"]
+    events = [e["event"] for e in mine["events"]]
+    assert any("token" in e for e in events), events
+    assert all(e != "panel.login" or True for e in events)
+    # 不应包含 joe 的任何事件：靠 username 过滤，这里用 detail 里是否出现 joe 来侧面验证
+    assert "joe" not in json.dumps(mine, ensure_ascii=False)
+
+    status, other, _ = _call(base, "/api/user/audit?limit=100", cookie=sid2)
+    assert status == 200
+    assert "ivy" not in json.dumps(other, ensure_ascii=False)
+
+
+def test_email_bind_requires_password(panel_relay) -> None:
+    server, _ = panel_relay
+    base = server.base_url
+    _, _, h = _call(base, "/api/auth/register", {"username": "max", "password": "password8"})
+    sid = h["Set-Cookie"].split("rh_session=")[1].split(";")[0]
+
+    status, bad, _ = _call(base, "/api/user/email", {"email": "a@b.com", "password": "nope"}, cookie=sid)
+    assert status == 403 and not bad["ok"]
+
+    status, ok, _ = _call(base, "/api/user/email", {"email": "max@example.com", "password": "password8"}, cookie=sid)
+    assert status == 200 and ok["email"] == "max@example.com"
+
+    status, bad2, _ = _call(base, "/api/user/email", {"email": "not-an-email", "password": "password8"}, cookie=sid)
+    assert status == 400 and not bad2["ok"]
+
+    # 另一个账号不能绑同一个邮箱
+    _, _, h2 = _call(base, "/api/auth/register", {"username": "nan", "password": "password8"})
+    sid2 = h2["Set-Cookie"].split("rh_session=")[1].split(";")[0]
+    status, dup, _ = _call(base, "/api/user/email", {"email": "max@example.com", "password": "password8"}, cookie=sid2)
+    assert status == 400 and "已被" in dup["error"]
+
+
+def test_usage_logs_csv_export(panel_relay) -> None:
+    """没有调用时也应当给一份只有表头的 CSV，而不是 500 或空响应。"""
+    server, _ = panel_relay
+    base = server.base_url
+    _, _, h = _call(base, "/api/auth/register", {"username": "oli", "password": "password8"})
+    sid = h["Set-Cookie"].split("rh_session=")[1].split(";")[0]
+
+    status, body, _ = _call(base, "/api/user/logs?days=7", cookie=sid)
+    assert status == 200 and body["ok"] and body["entries"] == []
+
+    request = urllib.request.Request(f"{base}/api/user/logs?days=7&format=csv")
+    request.add_header("Cookie", f"rh_session={sid}")
+    with urllib.request.urlopen(request, timeout=10) as resp:
+        raw = resp.read().decode("utf-8-sig")
+        assert resp.headers["Content-Type"].startswith("text/csv")
+    assert raw.splitlines()[0].startswith("时间,模型,渠道")

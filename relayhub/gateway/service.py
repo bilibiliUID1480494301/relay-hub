@@ -1175,11 +1175,30 @@ function panelExtras(u){
   out+='<h3>账户安全</h3>';
   out+='<p class="sub">改密码会同时让其他设备上的登录失效；建议改完重新登录一次。</p>';
   out+='<div class="row">'
+    +'<label>邮箱 <input id="em-addr" placeholder="用于联系与找回" value="'+esc(u.email||'')+'"></label>'
+    +'<label>当前密码 <input id="em-pw" type="password" autocomplete="current-password"></label>'
+    +'<button class="ghost" onclick="bindEmail()">'+(u.email?'更换邮箱':'绑定邮箱')+'</button>'
+    +'</div>';
+  out+='<p class="sub">本站未接入邮件服务，邮箱仅用于站长联系与人工找回；忘记密码请找站长重置。</p>';
+  out+='<div class="row">'
     +'<label>原密码 <input id="pw-old" type="password" autocomplete="current-password"></label>'
     +'<label>新密码 <input id="pw-new" type="password" autocomplete="new-password" placeholder="至少 8 位"></label>'
     +'<button onclick="changePassword()">修改密码</button>'
     +'<button class="ghost" onclick="revokeSessions()">退出其他设备</button>'
     +'</div>';
+
+  out+='<h3>使用日志</h3>';
+  out+='<div class="row">'
+    +'<label>范围 <select id="lg-days"><option value="1">今天</option><option value="7" selected>近 7 天</option><option value="30">近 30 天</option></select></label>'
+    +'<label>模型 <input id="lg-model" placeholder="留空 = 全部"></label>'
+    +'<label>结果 <select id="lg-status"><option value="">全部</option><option value="ok">成功</option><option value="fail">失败</option></select></label>'
+    +'<button onclick="loadLogs()">筛选</button>'
+    +'<button class="ghost" onclick="exportLogs()">导出 CSV</button>'
+    +'</div><div id="lg-box"><p class="sub">（点「筛选」按条件加载）</p></div>';
+
+  out+='<h3>审计日志</h3>';
+  out+='<p class="sub">登录、密钥变更、改密、邮箱绑定等操作记录。只有你自己的。</p>';
+  out+='<div id="au-box"><p class="sub">加载中…</p></div>';
 
   var rc=(u.recent||[]);
   out+='<h3>最近消费</h3>';
@@ -1191,6 +1210,52 @@ function panelExtras(u){
 async function doRedeem(){err('');var j=await api('/api/user/redeem',{code:document.getElementById('code').value.trim()});
   if(!j.ok){err(j.error);return;}
   document.getElementById('msg').textContent='+'+j.credits+' 点，当前余额 '+j.quota;refresh();}
+async function bindEmail(){
+  var addr=(document.getElementById('em-addr').value||'').trim();
+  var pw=document.getElementById('em-pw').value;
+  var j=await api('/api/user/email',{email:addr,password:pw});
+  if(!j.ok){alert(j.error||'绑定失败');return;}
+  alert(addr?('已绑定 '+addr):'已解绑邮箱');refresh();
+}
+function logQuery(){
+  var d=document.getElementById('lg-days').value;
+  var m=(document.getElementById('lg-model').value||'').trim();
+  var s=document.getElementById('lg-status').value;
+  var q='days='+encodeURIComponent(d);
+  if(m)q+='&model='+encodeURIComponent(m);
+  if(s)q+='&status='+encodeURIComponent(s);
+  return q;
+}
+async function loadLogs(){
+  var box=document.getElementById('lg-box');
+  box.innerHTML='<p class="sub">加载中…</p>';
+  var r=await fetch('/api/user/logs?'+logQuery(),{credentials:'same-origin'});
+  var j=await r.json();
+  if(!j.ok){box.innerHTML='<p class="sub">'+esc(j.error||'加载失败')+'</p>';return;}
+  if(!j.entries||!j.entries.length){box.innerHTML='<p class="sub">（这个范围内没有调用）</p>';return;}
+  box.innerHTML='<p class="sub">共 '+j.total+' 条'+(j.total>j.entries.length?'（显示最近 '+j.entries.length+' 条）':'')+'</p>'
+    +'<table><tr><th>时间</th><th>模型</th><th>结果</th><th>tokens</th><th>耗时</th><th>扣点</th></tr>'
+    +j.entries.slice().reverse().map(function(e){
+      var d=new Date((e.ts||0)*1000);
+      return '<tr><td class="mono">'+d.toLocaleString()+'</td><td>'+esc(e.model||'-')+'</td>'
+        +'<td>'+(e.ok?'成功':'失败')+'</td>'
+        +'<td class="mono">'+(e.tokens_in||0)+'&rarr;'+(e.tokens_out||0)+'</td>'
+        +'<td class="mono">'+(e.latency_ms||0)+'ms</td><td class="mono">'+(e.cost||0)+'</td></tr>';
+    }).join('')+'</table>';
+}
+function exportLogs(){ location.href='/api/user/logs?'+logQuery()+'&format=csv'; }
+async function loadAudit(){
+  var box=document.getElementById('au-box');
+  var r=await fetch('/api/user/audit?limit=100',{credentials:'same-origin'});
+  var j=await r.json();
+  if(!j.ok){box.innerHTML='<p class="sub">'+esc(j.error||'加载失败')+'</p>';return;}
+  if(!j.events||!j.events.length){box.innerHTML='<p class="sub">（还没有记录）</p>';return;}
+  box.innerHTML='<table><tr><th>时间</th><th>操作</th><th>来源 IP</th></tr>'
+    +j.events.map(function(e){
+      var d=new Date((e.ts||0)*1000);
+      return '<tr><td class="mono">'+d.toLocaleString()+'</td><td class="mono">'+esc(e.event)+'</td><td class="mono">'+esc(e.ip||'-')+'</td></tr>';
+    }).join('')+'</table>';
+}
 async function changePassword(){
   var o=document.getElementById('pw-old').value, n=document.getElementById('pw-new').value;
   if(n.length<8){alert('新密码至少 8 位');return;}
@@ -1232,7 +1297,7 @@ async function doRotate(){if(!confirm('旧 Key 立即失效，确定？'))return
 function showKey(t){h('<h2>你的新 API Key</h2><p class="sub">只显示这一次，立即复制保存</p>'+
   '<dl><dt>Key</dt><dd>'+esc(t)+'</dd></dl><button onclick="refresh()">我已保存，返回面板</button>');}
 async function logout(){await api('/api/auth/logout',{});renderAuth(false);}
-refresh();
+refresh().then(function(){ if(document.getElementById('au-box')) loadAudit(); });
 </script></body></html>"""
 
 
@@ -1633,6 +1698,9 @@ class RelayHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/user/sessions/revoke":
                 self._user_sessions_revoke(user)
+                return
+            if path == "/api/user/email":
+                self._user_email(user)
                 return
             if path == "/api/user/redeem":
                 body = self._read_json() or {}
@@ -2409,6 +2477,12 @@ class RelayHandler(BaseHTTPRequestHandler):
         if path == "/api/user/tokens":
             self._user_tokens_list()
             return
+        if path == "/api/user/audit":
+            self._user_audit()
+            return
+        if path == "/api/user/logs":
+            self._user_logs()
+            return
         if path == "/api/user/me":
             user = self._session_user()
             if user is None or self.users is None:
@@ -2436,6 +2510,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                     "unlimited": bool(fresh and fresh.quota < 0),
                     # —— #20 面板增强：名下密钥 / 可见模型 / 本人消费明细 ——
                     "keys": [self._token_view(t) for t in self._own_tokens(user)],
+                    "email": str(getattr(user, "email", "") or ""),
                     "models": self._panel_models(user),
                     "key_limit": self.USER_TOKEN_LIMIT,
                     **dict(zip(("recent", "usage"), self._panel_recent(user))),
@@ -2672,6 +2747,131 @@ class RelayHandler(BaseHTTPRequestHandler):
     def _user_sessions_revoke(self, user: Any) -> None:
         dropped = self._drop_other_sessions(user.user_id)
         self._send_json(200, {"ok": True, "revoked_sessions": dropped})
+
+    def _user_audit(self) -> None:
+        """本人相关的审计事件（登录、密钥、密码、邮箱）。
+
+        只按 username 过滤自己——管理员面那条 /api/audit 是全站的，
+        用户面板不能复用，否则等于把别人的登录记录也给出去了。
+        """
+        user = self._session_user()
+        if user is None:
+            self._send_json(401, {"ok": False, "error": "请先登录"})
+            return
+        query = parse_qs(urlsplit(self.path).query)
+        try:
+            limit = min(max(int((query.get("limit") or ["100"])[0]), 1), 500)
+        except ValueError:
+            limit = 100
+        events = audit_module.tail(paths.audit_path(), limit=500)
+        mine = [
+            {
+                "ts": e.get("ts", 0),
+                "event": str(e.get("event") or ""),
+                "ip": str(e.get("ip") or e.get("client") or ""),
+                "detail": {
+                    k: v for k, v in e.items()
+                    if k not in ("ts", "event", "ip", "client", "username")
+                },
+            }
+            for e in events
+            if str(e.get("username") or "") == user.username
+        ]
+        self._send_json(200, {"ok": True, "events": mine[-limit:][::-1]})  # 最新在前
+
+    def _user_logs(self) -> None:
+        """调用日志：按天/模型/结果筛选，可导出 CSV。
+
+        数据源是 reqlog（每次调用一行），只取**本人令牌**产生的记录——
+        判定口径与 usage_for 一致（按令牌名集合），避免看到别人的用量。
+        """
+        user = self._session_user()
+        if user is None:
+            self._send_json(401, {"ok": False, "error": "请先登录"})
+            return
+        query = parse_qs(urlsplit(self.path).query)
+        try:
+            days = min(max(int((query.get("days") or ["7"])[0]), 1), 90)
+        except ValueError:
+            days = 7
+        model_filter = str((query.get("model") or [""])[0])
+        status_filter = str((query.get("status") or [""])[0])   # ok | fail | ""
+        want_csv = (query.get("format") or [""])[0] == "csv"
+
+        names = {t.name for t in self._own_tokens(user)}
+        if not names:
+            self._send_json(200, {"ok": True, "entries": [], "total": 0, "models": []})
+            return
+        cutoff = time.time() - days * 86400
+        limit = 5000 if want_csv else 300
+        try:
+            rows = reqlog.tail(self.server.requests_log_path, limit=limit * 3)  # type: ignore[attr-defined]
+        except Exception:
+            rows = []
+        entries = []
+        for e in rows:
+            if str(e.get("token") or "") not in names:
+                continue
+            if float(e.get("ts") or 0) < cutoff:
+                continue
+            if model_filter and str(e.get("model") or "") != model_filter:
+                continue
+            if status_filter == "ok" and not e.get("ok"):
+                continue
+            if status_filter == "fail" and e.get("ok"):
+                continue
+            entries.append(e)
+        entries = entries[-limit:]
+        models = sorted({str(e.get("model") or "") for e in entries if e.get("model")})
+
+        if want_csv:
+            import csv as _csv
+            import io as _io
+
+            buf = _io.StringIO()
+            writer = _csv.writer(buf)
+            writer.writerow(["时间", "模型", "渠道", "结果", "输入tokens", "输出tokens", "缓存读", "耗时ms", "扣点"])
+            for e in entries:
+                writer.writerow([
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(e.get("ts") or 0))),
+                    e.get("model", ""), e.get("channel", ""),
+                    "成功" if e.get("ok") else "失败",
+                    int(e.get("tokens_in") or 0), int(e.get("tokens_out") or 0),
+                    int(e.get("cache_read") or 0), int(e.get("latency_ms") or 0),
+                    int(e.get("cost") or 0),
+                ])
+            raw = buf.getvalue().encode("utf-8-sig")   # BOM：Excel 打开中文不乱码
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="usage.csv"')
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+
+        self._send_json(200, {
+            "ok": True,
+            "days": days,
+            "total": len(entries),
+            "models": models,
+            "entries": entries[-300:],
+        })
+
+    def _user_email(self, user: Any) -> None:
+        """绑定邮箱：要密码确认（否则拿到 cookie 就能把找回渠道改成自己的）。"""
+        body = self._read_json() or {}
+        if self.users.verify(user.username, str(body.get("password") or "")) is None:
+            self._send_json(403, {"ok": False, "error": "密码不正确"})
+            return
+        email = str(body.get("email") or "").strip()
+        try:
+            self.users.mutate(lambda pool: pool.set_email(user.user_id, email))
+        except Exception as exc:
+            self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+        audit_module.record("panel.email", path=paths.audit_path(),
+                            username=user.username, has_email=bool(email))
+        self._send_json(200, {"ok": True, "email": email})
 
     # ---- 自助密钥：用户建自己的 key，参数自己选（额度/有效期/模型/IP/自查） ----
 

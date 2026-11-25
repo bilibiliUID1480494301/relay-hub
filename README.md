@@ -756,6 +756,7 @@ relayhub.gateway serve --pool %LOCALAPPDATA%/relay-hub/pool.json --api-key my-ma
 |------|------|
 | [docs/PERF.md](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/PERF.md) | 性能：本机基线、串行化点根因、与同类网关对比的正确做法 |
 | [docs/API.md](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/API.md) | Python API 完整函数列表（建站 / 客户端 / E2E / 渠道池 / 令牌 / 用户与额度） |
+| [docs/PANEL.md](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/PANEL.md) | 用户面板：自助密钥（额度/IP/模型/有效期）、用量与日志导出、审计、改密码与会话、免责边界 |
 | [docs/ADMIN.md](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/ADMIN.md) | 管理面使用与页面自定义（CSS 主题令牌、TOTP 动态管理密码、管理面 API 一览） |
 | [docs/PRICING.md](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/PRICING.md) | 计费规则（标价 / 分组倍率 / 分时峰谷 / 上游成本倍率 / 利润报表 / 渠道分组 / 兑换码） |
 | [docs/BILLING.md](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/BILLING.md) | 账单：本站 billing 接口（可开关）+ 上游 new-api 余额/倍率/单次成本口径 |

@@ -118,6 +118,8 @@ class User:
     quota: int = 0
     used: int = 0
     group: str = "default"
+    # 联系与找回用；不做邮箱验证（自建站没有可信 SMTP 就不假装能验证）。
+    email: str = ""
     note: str = ""
     # 管理面逐项授权（仅 role=admin 用）；owner 恒为全量
     scopes: list[str] = field(default_factory=list)
@@ -140,6 +142,7 @@ class User:
             scopes=[str(s) for s in (raw.get("scopes") or [])],
             used=int(raw.get("used", 0) or 0),
             group=str(raw.get("group") or "default"),
+            email=str(raw.get("email") or ""),
             note=str(raw.get("note", "")),
             created_at=float(raw.get("created_at", 0.0) or 0.0),
         )
@@ -336,6 +339,21 @@ class UserPool:
         for user in self.users:
             if user.user_id == user_id:
                 user.password_hash = hash_password(new_password)
+                return
+        raise UserError("用户不存在")
+
+    def set_email(self, user_id: str, email: str) -> None:
+        """绑定/解绑邮箱（调用方持锁落盘）。只做格式与唯一性检查。"""
+        addr = email.strip()
+        if addr:
+            if "@" not in addr or "." not in addr.split("@")[-1] or len(addr) > 120:
+                raise UserError("邮箱格式不正确")
+            for u in self.users:
+                if u.email.lower() == addr.lower() and u.user_id != user_id:
+                    raise UserError("该邮箱已被其他账号绑定")
+        for u in self.users:
+            if u.user_id == user_id:
+                u.email = addr
                 return
         raise UserError("用户不存在")
 
