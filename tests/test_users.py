@@ -447,3 +447,21 @@ def test_usage_logs_csv_export(panel_relay) -> None:
         raw = resp.read().decode("utf-8-sig")
         assert resp.headers["Content-Type"].startswith("text/csv")
     assert raw.splitlines()[0].startswith("时间,模型,渠道")
+
+
+def test_model_market_shows_my_price_and_marks_warm(panel_relay) -> None:
+    """模型广场：价格按分组倍率算；没有调用过的模型也不能报 100% 成功率。"""
+    server, _ = panel_relay
+    base = server.base_url
+    _, _, h = _call(base, "/api/auth/register", {"username": "pia", "password": "password8"})
+    sid = h["Set-Cookie"].split("rh_session=")[1].split(";")[0]
+
+    status, body, _ = _call(base, "/api/user/models?days=7", cookie=sid)
+    assert status == 200 and body["ok"]
+    assert isinstance(body["models"], list)
+    for m in body["models"]:
+        assert m["price_in_per_1m"] >= 0 and m["price_out_per_1m"] >= 0
+        assert m["scope"] in ("mine", "site", "none")
+        if m["calls"] == 0:
+            assert m["ok_rate"] == 0.0 and m["speed"] == 0.0
+        assert isinstance(m["warm"], bool)

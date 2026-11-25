@@ -1144,7 +1144,17 @@ function renderHome(u){
     '<div class="row" style="margin-top:14px"><button class="ghost" onclick="logout()">退出登录</button></div>');
 }
 function panelExtras(u){
-  var out='<h3>可用模型</h3><p class="sub">'+((u.models||[]).join('、')||'（暂无）')+'</p>';
+  var out='<h3>模型广场</h3>';
+  out+='<p class="sub">价格按你的分组倍率与当前时段算；速度/成功率优先用你自己的调用，样本不足时退回全站并标注来源。</p>';
+  out+='<div class="row">'
+    +'<label>搜索 <input id="mk-q" placeholder="模型名" oninput="renderMarket()"></label>'
+    +'<label>排序 <select id="mk-sort" onchange="renderMarket()">'
+      +'<option value="calls">按调用量</option><option value="speed">按速度</option>'
+      +'<option value="ok">按成功率</option><option value="price">按价格</option><option value="name">按名称</option>'
+    +'</select></label>'
+    +'<button class="ghost" onclick="loadMarket()">刷新</button>'
+    +'<span class="sub" id="mk-msg"></span>'
+    +'</div><div id="mk-box"><p class="sub">加载中…</p></div>';
   var ks=(u.keys||[]);
   out+='<h3>我的密钥</h3>';
   out+='<p class="sub">每把密钥可以单独设额度、有效期、可用模型与来源 IP；额度用尽或过期即停用。</p>';
@@ -1210,6 +1220,41 @@ function panelExtras(u){
 async function doRedeem(){err('');var j=await api('/api/user/redeem',{code:document.getElementById('code').value.trim()});
   if(!j.ok){err(j.error);return;}
   document.getElementById('msg').textContent='+'+j.credits+' 点，当前余额 '+j.quota;refresh();}
+var MARKET=[];
+async function loadMarket(){
+  var box=document.getElementById('mk-box');
+  if(!box) return;
+  var r=await fetch('/api/user/models?days=7',{credentials:'same-origin'});
+  var j=await r.json();
+  if(!j.ok){box.innerHTML='<p class="sub">'+esc(j.error||'加载失败')+'</p>';return;}
+  MARKET=j.models||[];
+  document.getElementById('mk-msg').textContent=MARKET.length+' 个模型 · 分组 '+j.group+' ×'+j.group_multiplier+(j.peak_now?'（当前峰时）':'');
+  renderMarket();
+}
+function renderMarket(){
+  var box=document.getElementById('mk-box'); if(!box) return;
+  if(!MARKET.length){box.innerHTML='<p class="sub">（没有可用模型）</p>';return;}
+  var q=(document.getElementById('mk-q').value||'').trim().toLowerCase();
+  var key=document.getElementById('mk-sort').value;
+  var list=MARKET.filter(function(m){return !q||m.model.toLowerCase().indexOf(q)>=0;});
+  list.sort(function(a,b){
+    if(key==='speed')return b.speed-a.speed;
+    if(key==='ok')return b.ok_rate-a.ok_rate;
+    if(key==='price')return a.price_in_per_1m-b.price_in_per_1m;
+    if(key==='name')return a.model.localeCompare(b.model);
+    return b.calls-a.calls;
+  });
+  box.innerHTML='<table><tr><th>模型</th><th>入 / 出（元/百万）</th><th>速度</th><th>成功率</th><th>调用</th><th>状态</th></tr>'
+    +list.map(function(m){
+      var src={mine:'',site:'<span class="sub">（全站）</span>',none:'<span class="sub">（无数据）</span>'}[m.scope]||'';
+      var state=m.warm?'<span class="tag">可用</span>':'<span class="tag" style="color:#b5770a;border-color:#b5770a">冷却中</span>';
+      return '<tr><td>'+esc(m.model)+'</td>'
+        +'<td class="mono">'+m.price_in_per_1m.toFixed(2)+' / '+m.price_out_per_1m.toFixed(2)+'</td>'
+        +'<td class="mono">'+(m.speed?m.speed.toFixed(1)+' tok/s':'—')+'</td>'
+        +'<td class="mono">'+(m.calls?(m.ok_rate.toFixed(1)+'%'):'—')+' '+src+'</td>'
+        +'<td class="mono">'+(m.calls||0)+'</td><td>'+state+'</td></tr>';
+    }).join('')+'</table>';
+}
 async function bindEmail(){
   var addr=(document.getElementById('em-addr').value||'').trim();
   var pw=document.getElementById('em-pw').value;
@@ -1297,7 +1342,10 @@ async function doRotate(){if(!confirm('旧 Key 立即失效，确定？'))return
 function showKey(t){h('<h2>你的新 API Key</h2><p class="sub">只显示这一次，立即复制保存</p>'+
   '<dl><dt>Key</dt><dd>'+esc(t)+'</dd></dl><button onclick="refresh()">我已保存，返回面板</button>');}
 async function logout(){await api('/api/auth/logout',{});renderAuth(false);}
-refresh().then(function(){ if(document.getElementById('au-box')) loadAudit(); });
+refresh().then(function(){
+  if(document.getElementById('mk-box')) loadMarket();
+  if(document.getElementById('au-box')) loadAudit();
+});
 </script></body></html>"""
 
 
@@ -2477,6 +2525,9 @@ class RelayHandler(BaseHTTPRequestHandler):
         if path == "/api/user/tokens":
             self._user_tokens_list()
             return
+        if path == "/api/user/models":
+            self._user_models_market()
+            return
         if path == "/api/user/audit":
             self._user_audit()
             return
@@ -2747,6 +2798,110 @@ class RelayHandler(BaseHTTPRequestHandler):
     def _user_sessions_revoke(self, user: Any) -> None:
         dropped = self._drop_other_sessions(user.user_id)
         self._send_json(200, {"ok": True, "revoked_sessions": dropped})
+
+    def _user_models_market(self) -> None:
+        """用户侧模型广场：我能不能用、多少钱、最近表现如何。
+
+        三点必须诚实：
+          * 价格是**我的**单价（全局价 × 我的分组倍率 × 当前时段倍率），不是上游进价；
+          * 速度/成功率优先用**本人**最近 7 天的数据，样本不足时退回全站，
+            并明确标记来源（scope 字段），避免把别人的体感当成自己的；
+          * 渠道在冷却中的模型标 warm=false，而不是从列表里抹掉——
+            「现在不能用」和「本站没有」是两件事。
+        """
+        user = self._session_user()
+        if user is None:
+            self._send_json(401, {"ok": False, "error": "请先登录"})
+            return
+        query = parse_qs(urlsplit(self.path).query)
+        try:
+            days = min(max(int((query.get("days") or ["7"])[0]), 1), 30)
+        except ValueError:
+            days = 7
+
+        pool = self.users.pool if self.users else None
+        mult = pool.multiplier_for(user) if pool else 1.0
+        now_mult = pool.time_multiplier() if pool else 1.0
+        price_in = (pool.price_in_per_1k if pool else 0.0) * mult * now_mult
+        price_out = (pool.price_out_per_1k if pool else 0.0) * mult * now_mult
+
+        models = self._panel_models(user)
+        # 冷却状态：直接看渠道池里还有没有「启用 + 未冷却 + 支持该模型」的 key。
+        # 用路由的 candidates() 会推进轮询游标，等于用户刷页面就改了调度顺序。
+        keys = list(getattr(getattr(self.router, "pool", None), "keys", []) or [])
+        stamp = time.time()
+
+        def _warm(model: str) -> bool:
+            if not keys:
+                return True   # 拿不到渠道池就别谎报不可用
+            return any(
+                k.enabled and k.is_available(stamp) and (not k.models or model in k.models)
+                for k in keys
+            )
+
+        warm = {m: _warm(m) for m in models}
+
+        names = {t.name for t in self._own_tokens(user)}
+        cutoff = time.time() - days * 86400
+        try:
+            rows = reqlog.tail(self.server.requests_log_path, limit=4000)  # type: ignore[attr-defined]
+        except Exception:
+            rows = []
+        mine: dict[str, list[dict]] = {}
+        site: dict[str, list[dict]] = {}
+        for e in rows:
+            if float(e.get("ts") or 0) < cutoff:
+                continue
+            model = str(e.get("model") or "")
+            if not model:
+                continue
+            site.setdefault(model, []).append(e)
+            if str(e.get("token") or "") in names:
+                mine.setdefault(model, []).append(e)
+
+        def _stats(entries: list[dict]) -> dict:
+            ok = [e for e in entries if e.get("ok")]
+            speeds = [
+                float(e["tokens_out"]) / (float(e["latency_ms"]) / 1000.0)
+                for e in ok
+                if float(e.get("latency_ms") or 0) > 200 and float(e.get("tokens_out") or 0) > 0
+            ]
+            speeds.sort()
+            median = speeds[len(speeds) // 2] if speeds else 0.0
+            return {
+                "calls": len(entries),
+                "ok_rate": round(len(ok) / len(entries) * 100, 1) if entries else 0.0,
+                "speed": round(median, 1),
+            }
+
+        out = []
+        for m in models:
+            mine_rows = mine.get(m, [])
+            site_rows = site.get(m, [])
+            if len(mine_rows) >= 3:
+                stats, scope = _stats(mine_rows), "mine"
+            elif site_rows:
+                stats, scope = _stats(site_rows), "site"
+            else:
+                stats, scope = {"calls": 0, "ok_rate": 0.0, "speed": 0.0}, "none"
+            out.append({
+                "model": m,
+                "warm": warm.get(m, True),
+                "price_in_per_1m": round(price_in * 1000, 4),
+                "price_out_per_1m": round(price_out * 1000, 4),
+                "peak_now": now_mult > 1.0,
+                "group_multiplier": mult,
+                **stats,
+                "scope": scope,
+            })
+        self._send_json(200, {
+            "ok": True,
+            "days": days,
+            "group": getattr(user, "group", "default"),
+            "group_multiplier": mult,
+            "peak_now": now_mult > 1.0,
+            "models": out,
+        })
 
     def _user_audit(self) -> None:
         """本人相关的审计事件（登录、密钥、密码、邮箱）。
