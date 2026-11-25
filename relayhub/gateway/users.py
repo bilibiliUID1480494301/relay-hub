@@ -329,6 +329,16 @@ class UserPool:
             return 0
         return max(1, math.ceil(base * self.multiplier_for(user) * self.time_multiplier(ts)))
 
+    def set_password(self, user_id: str, new_password: str) -> None:
+        """改密码（调用方负责持锁与落盘）。与注册同一套强度门槛。"""
+        if len(new_password) < 8:
+            raise UserError("密码至少 8 位")
+        for user in self.users:
+            if user.user_id == user_id:
+                user.password_hash = hash_password(new_password)
+                return
+        raise UserError("用户不存在")
+
     # -- 增删改（调用方负责持锁与落盘） -----------------------------------
 
     def register(self, username: str, password: str, *, role: str = "user") -> User:

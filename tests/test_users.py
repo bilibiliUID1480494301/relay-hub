@@ -343,3 +343,41 @@ def test_user_creates_and_manages_own_keys(panel_relay) -> None:
     # 本人删：从列表消失
     status, gone, _ = _call(base, "/api/user/tokens/delete", {"token_id": token_id}, cookie=sid)
     assert status == 200 and all(x["token_id"] != token_id for x in gone["tokens"])
+
+
+def test_password_change_revokes_other_sessions(panel_relay) -> None:
+    """改密码：旧密码错要拒；改成功后其他会话失效，本会话仍可用。"""
+    server, _ = panel_relay
+    base = server.base_url
+
+    status, body, headers = _call(base, "/api/auth/register", {"username": "ken", "password": "password8"})
+    assert status == 200 and body["ok"]
+    sid1 = headers["Set-Cookie"].split("rh_session=")[1].split(";")[0]
+
+    # 第二次登录 = 另一台设备
+    status, body, headers2 = _call(base, "/api/auth/login", {"username": "ken", "password": "password8"})
+    assert status == 200
+    sid2 = headers2["Set-Cookie"].split("rh_session=")[1].split(";")[0]
+    assert sid2 != sid1
+
+    # 旧密码错 → 403，且会话不被动
+    status, bad, _ = _call(base, "/api/user/password",
+                           {"old_password": "wrongpass", "new_password": "newpassword9"}, cookie=sid1)
+    assert status == 403 and not bad["ok"]
+
+    # 正确改密：踢掉另一个会话
+    status, ok, _ = _call(base, "/api/user/password",
+                          {"old_password": "password8", "new_password": "newpassword9"}, cookie=sid1)
+    assert status == 200 and ok["ok"] and ok["revoked_sessions"] >= 1
+
+    # sid2 已失效，sid1 仍有效
+    status, gone, _ = _call(base, "/api/user/tokens", cookie=sid2)
+    assert status == 401
+    status, still, _ = _call(base, "/api/user/tokens", cookie=sid1)
+    assert status == 200 and still["ok"]
+
+    # 新密码可登录，旧密码不行
+    status, _, _ = _call(base, "/api/auth/login", {"username": "ken", "password": "password8"})
+    assert status == 401
+    status, _, _ = _call(base, "/api/auth/login", {"username": "ken", "password": "newpassword9"})
+    assert status == 200

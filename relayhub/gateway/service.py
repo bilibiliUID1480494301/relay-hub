@@ -1172,6 +1172,15 @@ function panelExtras(u){
   } else {
     out+='<p class="sub">已达上限 '+(u.key_limit||20)+' 把，删掉不用的再建。</p>';
   }
+  out+='<h3>账户安全</h3>';
+  out+='<p class="sub">改密码会同时让其他设备上的登录失效；建议改完重新登录一次。</p>';
+  out+='<div class="row">'
+    +'<label>原密码 <input id="pw-old" type="password" autocomplete="current-password"></label>'
+    +'<label>新密码 <input id="pw-new" type="password" autocomplete="new-password" placeholder="至少 8 位"></label>'
+    +'<button onclick="changePassword()">修改密码</button>'
+    +'<button class="ghost" onclick="revokeSessions()">退出其他设备</button>'
+    +'</div>';
+
   var rc=(u.recent||[]);
   out+='<h3>最近消费</h3>';
   if(rc.length){out+='<table><tr><th>时间</th><th>模型</th><th>状态</th><th>tokens</th><th>扣点</th></tr>'+
@@ -1182,6 +1191,20 @@ function panelExtras(u){
 async function doRedeem(){err('');var j=await api('/api/user/redeem',{code:document.getElementById('code').value.trim()});
   if(!j.ok){err(j.error);return;}
   document.getElementById('msg').textContent='+'+j.credits+' 点，当前余额 '+j.quota;refresh();}
+async function changePassword(){
+  var o=document.getElementById('pw-old').value, n=document.getElementById('pw-new').value;
+  if(n.length<8){alert('新密码至少 8 位');return;}
+  var j=await api('/api/user/password',{old_password:o,new_password:n});
+  if(!j.ok){alert(j.error||'修改失败');return;}
+  alert('密码已修改，其他设备的登录已失效（'+(j.revoked_sessions||0)+' 个）');
+  document.getElementById('pw-old').value='';document.getElementById('pw-new').value='';
+}
+async function revokeSessions(){
+  if(!confirm('让其他设备上的登录全部失效？'))return;
+  var j=await api('/api/user/sessions/revoke',{});
+  if(!j.ok){alert(j.error||'操作失败');return;}
+  alert('已退出 '+(j.revoked_sessions||0)+' 个会话');
+}
 async function createKey(){
   var body={name:(document.getElementById('k-name').value||'').trim(),
     quota_tokens:parseInt(document.getElementById('k-quota').value,10)||0,
@@ -1603,6 +1626,13 @@ class RelayHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/user/tokens/delete":
                 self._user_token_delete(user)
+                return
+            # ---- 账户安全（对标 new-api 的「安全与访问」）----
+            if path == "/api/user/password":
+                self._user_password(user)
+                return
+            if path == "/api/user/sessions/revoke":
+                self._user_sessions_revoke(user)
                 return
             if path == "/api/user/redeem":
                 body = self._read_json() or {}
@@ -2600,6 +2630,48 @@ class RelayHandler(BaseHTTPRequestHandler):
             "expires_at": record.expires_at,
             "note": "明文只显示这一次，请立即保存",
         })
+
+    def _user_password(self, user: Any) -> None:
+        """改密码：先验旧密码，成功后**踢掉本会话之外的所有会话**。
+
+        只改密码不踢会话等于没改：旧设备上的 cookie 还能用 TTL 那么久。
+        """
+        body = self._read_json() or {}
+        old = str(body.get("old_password") or "")
+        new = str(body.get("new_password") or "")
+        if self.users.verify(user.username, old) is None:
+            self._send_json(403, {"ok": False, "error": "原密码不正确"})
+            return
+        try:
+            def change(pool: Any) -> None:
+                pool.set_password(user.user_id, new)
+
+            self.users.mutate(change)
+        except Exception as exc:  # UserError 或强度不足
+            self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+        dropped = self._drop_other_sessions(user.user_id)
+        audit_module.record(
+            "panel.password", path=paths.audit_path(),
+            username=user.username, revoked_sessions=dropped,
+        )
+        self._send_json(200, {"ok": True, "revoked_sessions": dropped})
+
+    def _drop_other_sessions(self, user_id: str) -> int:
+        """保留当前 sid，其余同用户会话全部作废。返回踢掉的数量。"""
+        keep = self._session_id()
+        dropped = 0
+        with self.server.session_lock:  # type: ignore[attr-defined]
+            sessions = self.server.sessions  # type: ignore[attr-defined]
+            for sid, (uid, _exp) in list(sessions.items()):
+                if uid == user_id and sid != keep:
+                    del sessions[sid]
+                    dropped += 1
+        return dropped
+
+    def _user_sessions_revoke(self, user: Any) -> None:
+        dropped = self._drop_other_sessions(user.user_id)
+        self._send_json(200, {"ok": True, "revoked_sessions": dropped})
 
     # ---- 自助密钥：用户建自己的 key，参数自己选（额度/有效期/模型/IP/自查） ----
 
