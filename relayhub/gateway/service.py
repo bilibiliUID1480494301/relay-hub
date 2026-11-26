@@ -947,292 +947,413 @@ PANEL_HTML = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><l
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__SITE__ 用户面板</title>
 <style>
-body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;__THEME_BG__
-color:#26215C;margin:0;display:flex;justify-content:center;min-height:100vh}
-.box{background:#fff;border:1px solid #E3E1DA;border-radius:14px;padding:28px;
-max-width:420px;width:92%;margin:60px 0;box-shadow:0 2px 8px rgba(38,33,92,.06);height:fit-content}
-h2{margin:0 0 6px;font-size:18px}
-p.sub{color:#5F5E5A;font-size:13px;margin:0 0 18px}
-input{width:100%;box-sizing:border-box;padding:9px 11px;margin:6px 0 12px;border:1px solid #E3E1DA;
-border-radius:8px;font:inherit}
-button{background:#185FA5;color:#fff;border:none;border-radius:8px;padding:9px 14px;
-font:inherit;cursor:pointer;width:100%}
-button.ghost{background:transparent;color:#185FA5;border:1px solid #185FA5}
-button:disabled{opacity:.5}
-.row{display:flex;gap:8px}
-.row button{flex:1}
-dl{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:13px;margin:0 0 16px}
-dt{color:#5F5E5A}dd{margin:0;font-family:ui-monospace,Consolas,monospace;word-break:break-all}
-.err{color:#A32D2D;font-size:12px;min-height:16px;margin:4px 0}
-.ok-msg{color:#0F6E56;font-size:12px;min-height:16px;margin:4px 0}
-h3{font-size:13px;color:#5F5E5A;margin:18px 0 8px;font-weight:500}
-/* 背景偏好：只改 body 底色，存 localStorage——纯客户端，不过服务器，
-   所以不需要后端字段，也不会把个人偏好写进任何日志。 */
-.swatches{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.swatch{width:26px;height:26px;border-radius:6px;border:1px solid #E3E1DA;cursor:pointer;padding:0}
-.swatch[data-active="1"]{outline:2px solid #185FA5;outline-offset:2px}
-.swatch-reset{font-size:11px;color:#5F5E5A;background:transparent;border:1px solid #E3E1DA;
-border-radius:6px;padding:4px 8px;cursor:pointer;width:auto}
-.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.metric{background:#FBFAF8;border:1px solid #E3E1DA;border-radius:10px;padding:10px 12px}
-.metric .k{color:#5F5E5A;font-size:11px;margin-bottom:4px}
-.metric .v{font-size:15px;font-weight:600;font-family:ui-monospace,Consolas,monospace}
-.metric .v small{font-weight:400;color:#0F6E56;font-size:11px;margin-left:4px}
+:root{--bg:#f6f7f9;--panel:#fff;--fg:#111827;--muted:#6b7280;--line:#e5e7eb;
+--brand:#2563eb;--brand-weak:#eff4ff;--ok:#16815a;--warn:#b5770a;--bad:#c0392b;
+--r:10px;--ctl:34px}
+@media(prefers-color-scheme:dark){:root{--bg:#101113;--panel:#17181b;--fg:#e8e8ea;
+--muted:#9aa1ab;--line:#2a2c30;--brand:#5b8def;--brand-weak:#1a2333}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);__THEME_BG__color:var(--fg);
+font:13.5px/1.6 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
+h2{font-size:16px;font-weight:600;margin:0 0 4px}
+h3{font-size:13.5px;font-weight:600;margin:18px 0 8px}
+p.sub,.sub{color:var(--muted);font-size:12px;margin:0 0 10px}
+a{color:var(--brand)}
+/* 登录 / 注册 */
+.auth-wrap{display:flex;justify-content:center;align-items:flex-start;min-height:100vh;padding:48px 16px}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px;
+width:100%;max-width:400px;box-shadow:0 8px 28px rgba(17,24,39,.06)}
+/* 主框架 */
+.shell{display:grid;grid-template-columns:196px minmax(0,1fr);gap:18px;max-width:1200px;
+margin:0 auto;padding:20px 22px 60px;align-items:start}
+aside{position:sticky;top:20px}
+.brand{font-weight:600;font-size:14px;padding:6px 10px 12px;letter-spacing:.2px}
+.brand .sub{display:block;font-weight:400;margin:2px 0 0}
+#pn{display:flex;flex-direction:column;gap:2px;background:var(--panel);border:1px solid var(--line);
+border-radius:var(--r);padding:6px}
+#pn button{height:32px;text-align:left;padding:0 10px;border:0;background:transparent;color:var(--muted);
+border-radius:8px;font:inherit;cursor:pointer;transition:background .12s,color .12s}
+#pn button:hover{background:var(--line);color:var(--fg)}
+#pn button.on{background:var(--brand-weak);color:var(--brand);font-weight:600}
+.side-foot{margin-top:10px;padding:0 4px}
+/* 面板块 */
+.pane{display:none}
+.pane.on{display:block}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px}
+/* 控件 */
+label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted);min-width:0}
+input,select,textarea{height:var(--ctl);font:inherit;font-size:13px;color:var(--fg);background:var(--panel);
+border:1px solid var(--line);border-radius:8px;padding:0 10px;width:100%}
+textarea{height:auto;padding:8px 10px}
+input:focus,select:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-weak)}
+button{height:var(--ctl);font:inherit;font-size:13px;padding:0 12px;border-radius:8px;cursor:pointer;
+border:1px solid var(--line);background:var(--panel);color:var(--fg);white-space:nowrap}
+button:hover{border-color:var(--muted)}
+button.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+button.ghost{background:transparent}
+button.link{border:0;background:none;color:var(--brand);padding:0;height:auto}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+.row label{flex:1 1 170px}
+.row>button{flex:0 0 auto}
+/* 表格 */
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;font-weight:600;font-size:11.5px;color:var(--muted);padding:7px 8px;
+border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+tbody tr:hover td{background:var(--brand-weak)}
+td.mono,th.mono,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+td.nowrap{white-space:nowrap}
+/* 统计块 */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:12px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.stat .k{font-size:11.5px;color:var(--muted)}
+.stat .v{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.3}
+/* 卡片网格（模型广场 / 排行榜） */
+.mgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(228px,1fr));gap:12px}
+.mcard{border:1px solid var(--line);border-radius:12px;padding:12px 13px;background:var(--panel);
+display:flex;flex-direction:column;gap:8px;transition:border-color .14s,transform .14s,box-shadow .14s}
+.mcard:hover{border-color:var(--brand);transform:translateY(-1px);box-shadow:0 6px 18px rgba(37,99,235,.10)}
+.mtop{display:flex;align-items:center;gap:9px;min-width:0}
+.mname{font-weight:600;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mrank{width:22px;height:22px;border-radius:7px;display:flex;align-items:center;justify-content:center;
+font-size:11.5px;font-weight:700;background:#f1f2f4;color:#5F5E5A;flex:0 0 auto}
+.mrank.r1{background:#fde9c8;color:#8a5a00}.mrank.r2{background:#e8eaee;color:#4b5563}.mrank.r3{background:#f7e2d3;color:#8a4b20}
+.mrow{display:flex;justify-content:space-between;align-items:baseline;font-variant-numeric:tabular-nums}
+.mrow b{font-size:13px;font-weight:600}
+.mbar{height:4px;border-radius:99px;background:#eef0f3;overflow:hidden}
+.mbar>i{display:block;height:100%;background:var(--brand);opacity:.75}
+/* 提示 */
+.err{color:var(--bad);font-size:12px;min-height:16px;margin:4px 0}
+.tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid var(--line);color:var(--muted)}
+.tag.ok{color:var(--ok);border-color:var(--ok)}
+.tag.warn{color:var(--warn);border-color:var(--warn)}
+/* 公告 */
+#ann{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
+.ann{background:var(--brand-weak);border:1px solid var(--brand);border-radius:10px;padding:10px 12px;font-size:12.5px}
+.ann.warning{background:#fdf3e2;border-color:var(--warn)}
+.ann.critical{background:#fdeceb;border-color:var(--bad)}
+@media(max-width:860px){
+  .shell{grid-template-columns:minmax(0,1fr);padding:14px}
+  aside{position:static}
+  #pn{flex-direction:row;flex-wrap:wrap}
+  #pn button{flex:1 1 40%}
+}
+</style>
+</head>
+<body>
+<div class="auth-wrap" id="auth"><div class="box" id="authbox"></div></div>
 
-</style></head><body><div class="box" id="app"></div>
+<div class="shell" id="app" style="display:none">
+  <aside>
+    <div class="brand">__SITE__<span class="sub">用户面板</span></div>
+    <nav id="pn">
+      <button data-p="overview" class="on">概览</button>
+      <button data-p="keys">我的密钥</button>
+      <button data-p="models">模型广场</button>
+      <button data-p="board">排行榜</button>
+      <button data-p="logs">使用日志</button>
+      <button data-p="audit">审计日志</button>
+      <button data-p="secure">账户安全</button>
+    </nav>
+    <div class="side-foot"><button class="ghost" id="logout">退出登录</button></div>
+  </aside>
+
+  <main>
+    <div id="ann"></div>
+
+    <section class="pane on" id="p-overview">
+      <div class="card" id="ov-head"></div>
+      <div class="stats" id="ov-stats"></div>
+      <div class="card">
+        <h3 style="margin-top:0">额度</h3>
+        <div class="row">
+          <label>兑换码 <input id="code" placeholder="输入兑换码"></label>
+          <button class="primary" id="redeem">兑换</button>
+          <button class="ghost" id="rotate">重置主 Key</button>
+        </div>
+        <p class="sub" style="margin:8px 0 0">主 Key 是所有设备共用的入口；单独用途请在「我的密钥」里建。</p>
+      </div>
+      <div class="card" id="ov-clients"></div>
+      <div class="card" id="ov-toip"></div>
+    </section>
+
+    <section class="pane" id="p-keys">
+      <div class="card">
+        <h2>我的密钥</h2>
+        <p class="sub">每把可独立设额度、有效期、模型与来源 IP；用尽或过期即停用，不影响其他密钥。</p>
+        <div id="keys"></div>
+        <div id="keyform"></div>
+      </div>
+    </section>
+
+    <section class="pane" id="p-models">
+      <div class="card">
+        <h2>模型广场</h2>
+        <p class="sub">价格按你的分组倍率与当前时段计算；速度/成功率优先用你自己的调用，样本不足时退回全站并标注。</p>
+        <div class="row">
+          <label>搜索 <input id="mk-q" placeholder="模型名"></label>
+          <label>排序 <select id="mk-sort">
+            <option value="calls">按调用量</option><option value="speed">按速度</option>
+            <option value="ok">按成功率</option><option value="price">按价格</option><option value="name">按名称</option>
+          </select></label>
+          <button id="mk-refresh">刷新</button>
+          <span class="sub" id="mk-msg" style="flex:1 1 100%;margin:0"></span>
+        </div>
+        <div id="mk-box" style="margin-top:12px"><p class="sub">加载中…</p></div>
+      </div>
+    </section>
+
+    <section class="pane" id="p-board">
+      <div class="card">
+        <h2>排行榜</h2>
+        <p class="sub">全站调用聚合（只出计数与速率，不含任何用户/令牌信息）。</p>
+        <div class="row">
+          <label>范围 <select id="lb-period">
+            <option value="today">今天</option><option value="week" selected>近 7 天</option><option value="month">近 30 天</option>
+          </select></label>
+          <span class="sub" id="lb-msg" style="margin:0"></span>
+        </div>
+        <div id="lb-box" style="margin-top:12px"><p class="sub">加载中…</p></div>
+      </div>
+    </section>
+
+    <section class="pane" id="p-logs">
+      <div class="card">
+        <h2>使用日志</h2>
+        <div class="row">
+          <label>范围 <select id="lg-days"><option value="1">今天</option><option value="7" selected>近 7 天</option><option value="30">近 30 天</option></select></label>
+          <label>模型 <input id="lg-model" placeholder="留空 = 全部"></label>
+          <label>结果 <select id="lg-status"><option value="">全部</option><option value="ok">成功</option><option value="fail">失败</option></select></label>
+          <button id="lg-go">筛选</button>
+          <button class="ghost" id="lg-csv">导出 CSV</button>
+        </div>
+        <div id="lg-box" style="margin-top:12px"><p class="sub">（点「筛选」按条件加载）</p></div>
+      </div>
+    </section>
+
+    <section class="pane" id="p-audit">
+      <div class="card">
+        <h2>审计日志</h2>
+        <p class="sub">登录、密钥变更、改密、邮箱绑定等操作记录。只有你自己的。</p>
+        <div id="au-box"><p class="sub">加载中…</p></div>
+      </div>
+    </section>
+
+    <section class="pane" id="p-secure">
+      <div class="card">
+        <h2>账户安全</h2>
+        <p class="sub">改密码会同时让其他设备上的登录失效。邮箱仅用于联系与人工找回（本站未接入邮件服务）。</p>
+        <div class="row">
+          <label>原密码 <input id="pw-old" type="password" autocomplete="current-password"></label>
+          <label>新密码 <input id="pw-new" type="password" autocomplete="new-password" placeholder="至少 8 位"></label>
+          <button class="primary" id="pw-go">修改密码</button>
+          <button class="ghost" id="sess-revoke">退出其他设备</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">邮箱</h3>
+        <div class="row">
+          <label>邮箱 <input id="em-addr" placeholder="用于联系与找回"></label>
+          <label>当前密码 <input id="em-pw" type="password" autocomplete="current-password"></label>
+          <button class="primary" id="em-go">保存</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">背景</h3>
+        <div id="bgbox"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
 <script>
+var base='',ME=null,CUR='overview';
+var MARKET=[],LOADED={};
 
-function esc(s){var d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
-function h(html){document.getElementById('app').innerHTML=html;}
-function err(m){var e=document.getElementById('msg');if(e){e.textContent=m||'';}}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function fmtNum(n){n=Number(n||0);if(n>=1e6)return (n/1e6).toFixed(1)+'M';
+  if(n>=1e3)return (n/1e3).toFixed(1)+'k';return String(Math.round(n));}
 async function api(path,body){
-  var r=await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:body?JSON.stringify(body):undefined});
-  var j=await r.json().catch(function(){return{ok:false,error:'响应解析失败'};});
-  if(!r.ok&&!j.error){j.error='HTTP '+r.status;}
+  var opt={credentials:'same-origin',headers:{}};
+  if(body!==undefined){opt.method='POST';opt.headers['content-type']='application/json';
+    opt.body=JSON.stringify(body);}
+  var r=await fetch(base+path,opt);
+  var t=await r.text(),j={};
+  try{j=t?JSON.parse(t):{};}catch(e){j={ok:false,error:t.slice(0,120)};}
+  if(!r.ok&&j.ok===undefined)j.ok=false;
   return j;
 }
-async function refresh(){
-  var r=await fetch(base+'/api/user/me');
-  if(r.status===401){renderAuth(false);return;}
-  var u=await r.json();
-  renderHome(u);
-  var blk=document.getElementById('app');
-  if(blk){ var div=document.createElement('div'); div.innerHTML=ticketBlock(); blk.appendChild(div); }
-  loadUsage();
+
+/* ---------- 侧栏切换（只有当前面板块跑加载，避免一次打满接口） ---------- */
+function show(p){
+  CUR=p;
+  document.querySelectorAll('#pn button').forEach(function(b){b.classList.toggle('on',b.dataset.p===p);});
+  document.querySelectorAll('.pane').forEach(function(s){s.classList.toggle('on',s.id==='p-'+p);});
+  if(p==='keys')renderKeys();
+  if(p==='models'&&!LOADED.models){loadMarket();}
+  if(p==='board'&&!LOADED.board){loadBoard();}
+  if(p==='audit'&&!LOADED.audit){loadAudit();}
+  if(location.hash!=='#'+p)history.replaceState(null,'','#'+p);
 }
-async function issueMyTicket(){
-  // 为自己签发一枚 TOIP 通行证：明文只显示这一次
-  var app=document.getElementById('app'); if(!app) return;
-  var box=document.getElementById('tk'); if(!box) return;
-  box.innerHTML='<p class="sub">签发中…</p>';
-  try{
-    var r=await fetch(base+'/api/user/toip',{method:'POST',credentials:'same-origin',
-      headers:{'content-type':'application/json'},body:JSON.stringify({name:'我的客户端'})});
-    var j=await r.json();
-    if(!j.ok){box.innerHTML='<p class="err">'+esc(j.error||'签发失败')+'</p>';return;}
-    box.innerHTML='<p class="sub">明文只显示这一次，请立即复制保存</p>'+
-      '<dl><dt>通行证</dt><dd class="mono">'+esc(j.ticket)+'</dd>'+
-      '<dt>名称</dt><dd>'+esc(j.name)+'</dd></dl>';
-  }catch(e){ box.innerHTML='<p class="err">连不上服务</p>'; }
-}
-function ticketBlock(){
-  return '<h3>我的通行证（TOIP）</h3>'+
-    '<p class="sub">给你的插件接入用；用量记在你自己名下。</p>'+
-    '<button onclick="issueMyTicket()">生成我的通行证</button>'+
-    '<div id="tk"></div>';
-}
-async function loadUsage(){
-  // 「我的客户端」：只有本人能看，服务端强制 session 身份
-  var app=document.getElementById('app'); if(!app) return;
-  var box=document.createElement('div'); box.className='usage';
-  app.appendChild(box);
-  try{
-    var r=await fetch(base+'/api/user/usage?days=7',{credentials:'same-origin'});
-    if(!r.ok){box.remove();return;}
-    var d=await r.json();
-    var rows=(d.by_client||[]).map(function(x){
-      return '<tr><td>'+esc(x.client)+'</td><td class="mono">'+x.requests+'</td>'+
-             '<td class="mono">'+(x.tokens_in||0)+'&rarr;'+(x.tokens_out||0)+'</td>'+
-             '<td class="mono">'+x.cost+'</td></tr>';
-    }).join('');
-    var direct=d.direct||{requests:0,cost:0};
-    box.innerHTML='<h3>我的客户端（近 '+(d.days||7)+' 天）</h3>'+
-      (rows?'<table><tr><th>客户端</th><th>请求</th><th>tokens</th><th>扣点</th></tr>'+rows+'</table>'
-           :'<p class="sub">还没有带客户端标识的调用</p>')+
-      '<p class="sub">直连 API 令牌：'+direct.requests+' 次 / '+direct.cost+' 点（不分账，已计入总量）</p>';
-  }catch(e){ box.remove(); }
-}
+document.getElementById('pn').addEventListener('click',function(e){
+  var b=e.target.closest('button[data-p]'); if(b)show(b.dataset.p);
+});
+
+/* ---------- 登录 / 注册 ---------- */
 function renderAuth(showRegister){
-  h('<h2>__SITE__ 用户面板</h2><p class="sub">'+(showRegister?'注册或登录以获取 API Key':'登录以管理你的 API Key 与额度')+'</p>'+
-    '<label>用户名</label><input id="u"><label>密码</label><input id="p" type="password">'+
-    '<div class="err" id="msg"></div>'+
-    '<div class="row"><button onclick="doLogin()">登录</button>'+
-    (showRegister?'<button class="ghost" onclick="doRegister()">注册</button>':'')+'</div>'+
-    '<h3>API 接入</h3><p class="sub">Base URL：本页地址（/panel 前的部分）<br>端点：/v1/chat/completions、/v1/messages 或 /v1beta/models/{model}:generateContent</p>');
-  window.__reg=showRegister;
-  document.getElementById('p').onkeydown=function(ev){if(ev.key==='Enter'){showRegister?doRegister():doLogin();}};
+  document.getElementById('app').style.display='none';
+  document.getElementById('auth').style.display='flex';
+  var box=document.getElementById('authbox');
+  box.innerHTML='<h2>'+(showRegister?'注册账号':'登录')+'</h2>'
+    +'<p class="sub">'+(showRegister?'注册后自动获得一把 API Key':'用站点账号登录，管理你自己的密钥')+'</p>'
+    +'<label>用户名<input id="a-user" autocomplete="username"></label>'
+    +'<label style="margin-top:8px">密码<input id="a-pass" type="password" autocomplete="current-password"></label>'
+    +'<div class="err" id="a-err"></div>'
+    +'<button class="primary" style="width:100%;margin-top:6px" id="a-go">'+(showRegister?'注册':'登录')+'</button>'
+    +'<p class="sub" style="margin-top:12px">'
+      +(showRegister?'已有账号？<button class="link" id="a-switch">去登录</button>'
+                    :'没有账号？<button class="link" id="a-switch">注册</button>')+'</p>';
+  document.getElementById('a-go').onclick=function(){showRegister?doRegister():doLogin();};
+  document.getElementById('a-switch').onclick=function(){renderAuth(!showRegister);};
+  document.getElementById('a-pass').onkeydown=function(e){if(e.key==='Enter')(showRegister?doRegister:doLogin)();};
 }
-async function doLogin(){err('');var j=await api('/api/auth/login',{username:document.getElementById('u').value.trim(),password:document.getElementById('p').value});
-  if(!j.ok){err(j.error);if(j.error&&(j.error.indexOf('不存在')>=0)&&window.__reg){err(j.error+'（可切换注册）');}return;}
-  refresh();}
-async function doRegister(){err('');var j=await api('/api/auth/register',{username:document.getElementById('u').value.trim(),password:document.getElementById('p').value});
-  if(!j.ok){err(j.error);return;}
-  renderHome({username:j.username,quota:j.quota,used:0,api_key_hint:'…'+j.token.slice(-4),unlimited:false});
-  showKey(j.token);}
-var base='';
-var BG_KEY='relayhub_panel_bg';
-function applyBg(c){
-  // 只改颜色，不用 background 简写——简写会把壁纸的 background-image 一起清掉
-  if(c){document.body.style.backgroundColor=c;}else{document.body.style.backgroundColor='';}
-  try{
-    if(c){localStorage.setItem(BG_KEY,c);}else{localStorage.removeItem(BG_KEY);}
-  }catch(e){/* 隐私模式存不了就算了，本次会话仍然生效 */}
-  var sw=document.querySelectorAll('.swatch');
-  for(var i=0;i<sw.length;i++){
-    sw[i].setAttribute('data-active', sw[i].getAttribute('data-c')===c?'1':'0');
+async function doLogin(){
+  var j=await api('/api/auth/login',{username:document.getElementById('a-user').value.trim(),
+    password:document.getElementById('a-pass').value});
+  if(!j.ok){document.getElementById('a-err').textContent=j.error||'登录失败';return;}
+  boot();
+}
+async function doRegister(){
+  var j=await api('/api/auth/register',{username:document.getElementById('a-user').value.trim(),
+    password:document.getElementById('a-pass').value});
+  if(!j.ok){document.getElementById('a-err').textContent=j.error||'注册失败';return;}
+  boot();
+}
+document.getElementById('logout').onclick=async function(){
+  await api('/api/auth/logout',{});renderAuth(false);
+};
+
+/* ---------- 概览 ---------- */
+function usageBlock(u){
+  var st=(u&&u.usage)||{};
+  var bal=(u&&u.unlimited)?'不限':fmtNum((u&&u.quota)||0);
+  return '<div class="stats">'
+    +'<div class="stat"><div class="k">余额</div><div class="v">'+bal+'</div></div>'
+    +'<div class="stat"><div class="k">请求 / 7 天</div><div class="v">'+fmtNum(st.requests)+'</div></div>'
+    +'<div class="stat"><div class="k">tokens 进 / 出</div><div class="v" style="font-size:15px">'+fmtNum(st.tokens_in)+' / '+fmtNum(st.tokens_out)+'</div></div>'
+    +'<div class="stat"><div class="k">缓存命中</div><div class="v">'+fmtNum(st.cache_read)+'<span class="sub" style="margin-left:4px">'+(st.cache_hit_rate||0)+'%</span></div></div>'
+    +'</div>';
+}
+function renderOverview(u){
+  document.getElementById('ov-head').innerHTML='<h2>'+esc(u.username)+'</h2>'
+    +'<p class="sub">分组 '+esc(u.group||'default')+' · 角色 '+esc(u.role||'user')
+    +(u.email?(' · '+esc(u.email)):'')+'</p>';
+  document.getElementById('ov-stats').innerHTML=usageBlock(u);
+  document.getElementById('ov-clients').innerHTML='<h3 style="margin-top:0">我的客户端（近 7 天）</h3>'
+    +'<div id="cl-box"><p class="sub">加载中…</p></div>'
+    +'<div id="rc-box"></div>';
+  document.getElementById('ov-toip').innerHTML='<h3 style="margin-top:0">我的通行证（TOIP）</h3>'
+    +'<p class="sub">给插件接入用，用量记在你自己名下。</p>'
+    +'<button class="ghost" id="tk-go">生成通行证</button><div id="tk"></div>';
+  document.getElementById('tk-go').onclick=issueMyTicket;
+  loadClients();
+  var rc=(u.recent||[]);
+  if(rc.length){
+    var rows=rc.slice(0,8).map(function(e){
+      var d=new Date((e.ts||0)*1000);
+      return '<tr><td class="mono nowrap">'+d.toLocaleString()+'</td><td>'+esc(e.model||'-')+'</td>'
+        +'<td class="nowrap">'+(e.ok?'<span class="tag ok">成功</span>':'<span class="tag warn">失败</span>')+'</td>'
+        +'<td class="mono">'+fmtNum(e.tokens_in)+' → '+fmtNum(e.tokens_out)+'</td><td class="mono">'+(e.cost||0)+'</td></tr>';
+    }).join('');
+    document.getElementById('rc-box').innerHTML='<h3>最近消费</h3>'
+      +'<table><thead><tr><th>时间</th><th>模型</th><th>结果</th><th>tokens</th><th>扣点</th></tr></thead><tbody>'+rows+'</tbody></table>';
   }
 }
-function bgBlock(){
-  var colors=['#F7F6F3','#EAF1F8','#EAF5EE','#F5EEE2','#F2ECF5'];
-  var dots=colors.map(function(c){
-    return '<button class="swatch" data-c="'+c+'" style="background:'+c+
-      '" onclick="applyBg(\\''+c+'\\')" title="'+c+'"></button>';
+async function loadClients(){
+  var box=document.getElementById('cl-box'); if(!box)return;
+  var d=await api('/api/user/usage?days=7');
+  if(!d||!d.by_client){box.innerHTML='<p class="sub">（暂无数据）</p>';return;}
+  var rows=(d.by_client||[]).map(function(x){
+    return '<tr><td>'+esc(x.client)+'</td><td class="mono">'+x.requests+'</td>'
+      +'<td class="mono">'+fmtNum(x.tokens_in)+' / '+fmtNum(x.tokens_out)+'</td><td class="mono">'+(x.cost||0)+'</td></tr>';
   }).join('');
-  return '<h3>背景</h3><div class="swatches">'+dots+
-    '<button class="swatch-reset" onclick="applyBg(\\'\\')">重置</button></div>';
+  box.innerHTML=rows?'<table><thead><tr><th>客户端</th><th>请求</th><th>tokens 进/出</th><th>扣点</th></tr></thead><tbody>'+rows+'</tbody></table>'
+    :'<p class="sub">（还没有调用记录）</p>';
 }
-(function(){try{applyBg(localStorage.getItem(BG_KEY));}catch(e){}})();
-function esc(s){var d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
-function h(html){document.getElementById('app').innerHTML=html;}
-function err(m){var e=document.getElementById('msg');if(e){e.textContent=m||'';}}
-async function api(path,body){
-  var r=await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:body?JSON.stringify(body):undefined});
-  var j=await r.json().catch(function(){return{ok:false,error:'响应解析失败'};});
-  if(!r.ok&&!j.error){j.error='HTTP '+r.status;}
-  return j;
+async function issueMyTicket(){
+  var box=document.getElementById('tk');
+  box.innerHTML='<p class="sub">签发中…</p>';
+  var j=await api('/api/user/toip',{name:'我的客户端'});
+  if(!j.ok){box.innerHTML='<p class="err">'+esc(j.error||'签发失败')+'</p>';return;}
+  box.innerHTML='<p class="sub">明文只显示这一次</p><div class="mono" style="word-break:break-all">'+esc(j.ticket)+'</div>';
 }
-async function refresh(){
-  var r=await fetch(base+'/api/user/me');
-  if(r.status===401){renderAuth(false);return;}
-  var u=await r.json();
-  renderHome(u);
+
+/* ---------- 密钥 ---------- */
+function keyRow(k){
+  var quota=k.quota_tokens>0?(fmtNum(k.used)+' / '+fmtNum(k.quota_tokens)):'不限';
+  var exp=k.expires_at?new Date(k.expires_at*1000).toLocaleDateString():'永久';
+  return '<tr><td>'+esc(k.name)+'</td><td class="mono nowrap">'+esc(k.hint||'—')+'</td>'
+    +'<td class="mono nowrap">'+quota+'</td><td class="nowrap">'+exp+'</td>'
+    +'<td class="nowrap">'+(k.enabled?'<span class="tag ok">启用</span>':'<span class="tag">停用</span>')+'</td>'
+    +'<td class="nowrap">'
+    +'<button class="ghost" data-id="'+k.token_id+'" data-next="'+(!k.enabled)+'" onclick="toggleKey(this)">'+(k.enabled?'停用':'启用')+'</button> '
+    +'<button class="ghost" data-id="'+k.token_id+'" data-name="'+esc(k.name)+'" onclick="delKey(this)">删除</button></td></tr>';
 }
-function renderAuth(showRegister){
-  h('<h2>__SITE__ 用户面板</h2><p class="sub">'+(showRegister?'注册或登录以获取 API Key':'登录以管理你的 API Key 与额度')+'</p>'+
-    '<label>用户名</label><input id="u"><label>密码</label><input id="p" type="password">'+
-    '<div class="err" id="msg"></div>'+
-    '<div class="row"><button onclick="doLogin()">登录</button>'+
-    (showRegister?'<button class="ghost" onclick="doRegister()">注册</button>':'')+'</div>'+
-    '<h3>API 接入</h3><p class="sub">Base URL：本页地址（/panel 前的部分）<br>端点：/v1/chat/completions、/v1/messages 或 /v1beta/models/{model}:generateContent</p>');
-  window.__reg=showRegister;
-  document.getElementById('p').onkeydown=function(ev){if(ev.key==='Enter'){showRegister?doRegister():doLogin();}};
-}
-async function doLogin(){err('');var j=await api('/api/auth/login',{username:document.getElementById('u').value.trim(),password:document.getElementById('p').value});
-  if(!j.ok){err(j.error);if(j.error&&(j.error.indexOf('不存在')>=0)&&window.__reg){err(j.error+'（可切换注册）');}return;}
-  refresh();}
-async function doRegister(){err('');var j=await api('/api/auth/register',{username:document.getElementById('u').value.trim(),password:document.getElementById('p').value});
-  if(!j.ok){err(j.error);return;}
-  renderHome({username:j.username,quota:j.quota,used:0,api_key_hint:'…'+j.token.slice(-4),unlimited:false});
-  showKey(j.token);}
-function fmtNum(n){n=Number(n)||0;if(n>=1e6)return (n/1e6).toFixed(1)+'M';
-  if(n>=1e3)return (n/1e3).toFixed(1)+'k';return String(n);}
-function usageBlock(u){
-  var s=u.usage||{};
-  if(!s.requests){return '<h3>用量</h3><p class="sub">还没有请求记录。</p>';}
-  var hit=Number(s.cache_hit_rate||0);
-  return '<h3>用量（最近 '+s.requests+' 次）</h3><div class="metrics">'+
-    '<div class="metric"><div class="k">输入 tokens</div><div class="v">'+fmtNum(s.tokens_in)+'</div></div>'+
-    '<div class="metric"><div class="k">输出 tokens</div><div class="v">'+fmtNum(s.tokens_out)+'</div></div>'+
-    '<div class="metric"><div class="k">缓存命中</div><div class="v">'+fmtNum(s.cache_read)+
-      '<small>'+hit+'%</small></div></div>'+
-    '<div class="metric"><div class="k">花费</div><div class="v">'+(s.cost||0)+' 点</div></div>'+
-    '</div>';
-}
-function renderHome(u){
-  h('<h2>'+esc(u.username)+'</h2><p class="sub">'+(u.unlimited?'管理员（不限量）':'按量计费 · 分组 '+esc(u.group))+'</p>'+
-    '<dl><dt>剩余额度</dt><dd>'+(u.unlimited?'∞':u.quota+' 点')+'</dd>'+
-    '<dt>累计消耗</dt><dd>'+u.used+' 点</dd>'+
-    '<dt>API Key</dt><dd>'+(u.api_key_hint?esc(u.api_key_hint):'（未发放）')+'</dd></dl>'+
-    '<h3>兑换码</h3><input id="code" placeholder="rhx-…"><div class="ok-msg" id="msg"></div>'+
-    '<button onclick="doRedeem()">兑换</button>'+
-    '<h3>API Key</h3><button class="ghost" onclick="doRotate()">重置 Key（旧 Key 立即失效）</button>'+
-    bgBlock()+
-    usageBlock(u)+
-    panelExtras(u)+
-    '<div class="row" style="margin-top:14px"><button class="ghost" onclick="logout()">退出登录</button></div>');
-}
-function panelExtras(u){
-  var out='<h3>模型广场</h3>';
-  out+='<p class="sub">价格按你的分组倍率与当前时段算；速度/成功率优先用你自己的调用，样本不足时退回全站并标注来源。</p>';
-  out+='<div class="row">'
-    +'<label>搜索 <input id="mk-q" placeholder="模型名" oninput="renderMarket()"></label>'
-    +'<label>排序 <select id="mk-sort" onchange="renderMarket()">'
-      +'<option value="calls">按调用量</option><option value="speed">按速度</option>'
-      +'<option value="ok">按成功率</option><option value="price">按价格</option><option value="name">按名称</option>'
-    +'</select></label>'
-    +'<button class="ghost" onclick="loadMarket()">刷新</button>'
-    +'<span class="sub" id="mk-msg"></span>'
-    +'</div><div id="mk-box"><p class="sub">加载中…</p></div>';
-  var ks=(u.keys||[]);
-  out+='<h3>我的密钥</h3>';
-  out+='<p class="sub">每把密钥可以单独设额度、有效期、可用模型与来源 IP；额度用尽或过期即停用。</p>';
-  if(ks.length){
-    out+='<table><tr><th>名称</th><th>密钥</th><th>额度</th><th>有效期</th><th>状态</th><th></th></tr>'+
-      ks.map(function(k){
-        var quota=(k.quota_tokens>0)?('<span class="mono">'+k.used+' / '+k.quota_tokens+'</span>'):'不限';
-        var exp=k.expires_at?new Date(k.expires_at*1000).toLocaleDateString():'永久';
-        return '<tr><td>'+esc(k.name)+'</td><td class="mono">'+esc(k.hint||'—')+'</td><td>'+quota+'</td><td>'+exp+'</td><td>'+(k.enabled?'启用':'停用')+'</td>'
-          +'<td style="white-space:nowrap">'
-          +'<button class="ghost" data-id="'+k.token_id+'" data-next="'+(!k.enabled)+'" onclick="toggleKey(this)">'+(k.enabled?'停用':'启用')+'</button> '
-          +'<button class="ghost" data-id="'+k.token_id+'" data-name="'+esc(k.name)+'" onclick="delKey(this)">删除</button>'
-          +'</td></tr>';
-      }).join('')+'</table>';
-  } else { out+='<p class="sub">（还没有密钥）</p>'; }
-  if((ks.length)<(u.key_limit||20)){
-    out+='<div class="row" style="margin-top:10px">'
+function renderKeys(){
+  var keys=(ME&&ME.keys)||[];
+  var box=document.getElementById('keys');
+  box.innerHTML=keys.length
+    ?'<table><thead><tr><th>名称</th><th>密钥</th><th>额度</th><th>有效期</th><th>状态</th><th></th></tr></thead><tbody>'
+      +keys.map(keyRow).join('')+'</tbody></table>'
+    :'<p class="sub">（还没有密钥）</p>';
+  var limit=(ME&&ME.key_limit)||20;
+  document.getElementById('keyform').innerHTML=keys.length<limit
+    ?'<h3>新建密钥</h3><div class="row">'
       +'<label>名称 <input id="k-name" placeholder="手机 / 平板 / 某工具"></label>'
       +'<label>额度(tokens) <input id="k-quota" type="number" min="0" placeholder="0=不限"></label>'
       +'<label>有效期(天) <input id="k-days" type="number" min="0" placeholder="0=永久"></label>'
       +'<label>模型限制 <input id="k-models" placeholder="逗号分隔；留空=不限"></label>'
       +'<label>IP 白名单 <input id="k-ip" placeholder="一行一个；留空=不限"></label>'
-      +'<label style="flex:0 0 auto"><input type="checkbox" id="k-self" checked style="height:auto"> 允许自查</label>'
-      +'<button onclick="createKey()">新建密钥</button></div>';
-  } else {
-    out+='<p class="sub">已达上限 '+(u.key_limit||20)+' 把，删掉不用的再建。</p>';
-  }
-  out+='<h3>账户安全</h3>';
-  out+='<p class="sub">改密码会同时让其他设备上的登录失效；建议改完重新登录一次。</p>';
-  out+='<div class="row">'
-    +'<label>邮箱 <input id="em-addr" placeholder="用于联系与找回" value="'+esc(u.email||'')+'"></label>'
-    +'<label>当前密码 <input id="em-pw" type="password" autocomplete="current-password"></label>'
-    +'<button class="ghost" onclick="bindEmail()">'+(u.email?'更换邮箱':'绑定邮箱')+'</button>'
-    +'</div>';
-  out+='<p class="sub">本站未接入邮件服务，邮箱仅用于站长联系与人工找回；忘记密码请找站长重置。</p>';
-  out+='<div class="row">'
-    +'<label>原密码 <input id="pw-old" type="password" autocomplete="current-password"></label>'
-    +'<label>新密码 <input id="pw-new" type="password" autocomplete="new-password" placeholder="至少 8 位"></label>'
-    +'<button onclick="changePassword()">修改密码</button>'
-    +'<button class="ghost" onclick="revokeSessions()">退出其他设备</button>'
-    +'</div>';
-
-  out+='<h3>使用日志</h3>';
-  out+='<div class="row">'
-    +'<label>范围 <select id="lg-days"><option value="1">今天</option><option value="7" selected>近 7 天</option><option value="30">近 30 天</option></select></label>'
-    +'<label>模型 <input id="lg-model" placeholder="留空 = 全部"></label>'
-    +'<label>结果 <select id="lg-status"><option value="">全部</option><option value="ok">成功</option><option value="fail">失败</option></select></label>'
-    +'<button onclick="loadLogs()">筛选</button>'
-    +'<button class="ghost" onclick="exportLogs()">导出 CSV</button>'
-    +'</div><div id="lg-box"><p class="sub">（点「筛选」按条件加载）</p></div>';
-
-  out+='<h3>审计日志</h3>';
-  out+='<p class="sub">登录、密钥变更、改密、邮箱绑定等操作记录。只有你自己的。</p>';
-  out+='<div id="au-box"><p class="sub">加载中…</p></div>';
-
-  var rc=(u.recent||[]);
-  out+='<h3>最近消费</h3>';
-  if(rc.length){out+='<table><tr><th>时间</th><th>模型</th><th>状态</th><th>tokens</th><th>扣点</th></tr>'+
-    rc.map(function(e){var d=new Date((e.ts||0)*1000);return '<tr><td class="mono">'+d.toLocaleString()+'</td><td>'+esc(e.model||'-')+'</td><td>'+(e.ok?'成功':'失败')+'</td><td class="mono">'+(e.tokens_in||0)+'&rarr;'+(e.tokens_out||0)+'</td><td class="mono">'+(e.cost||0)+'</td></tr>';}).join('')+'</table>';}
-  else{out+='<p class="sub">（还没有调用记录）</p>';}
-  return out;
+      +'<label style="flex:0 0 auto"><span>&nbsp;</span><button class="primary" onclick="createKey()">创建</button></label>'
+      +'</div>'
+    :'<p class="sub">已达上限 '+limit+' 把，删掉不用的再建。</p>';
 }
-async function doRedeem(){err('');var j=await api('/api/user/redeem',{code:document.getElementById('code').value.trim()});
-  if(!j.ok){err(j.error);return;}
-  document.getElementById('msg').textContent='+'+j.credits+' 点，当前余额 '+j.quota;refresh();}
-var MARKET=[];
+async function createKey(){
+  var body={name:(document.getElementById('k-name').value||'').trim(),
+    quota_tokens:parseInt(document.getElementById('k-quota').value,10)||0,
+    days:parseInt(document.getElementById('k-days').value,10)||0,
+    models_text:document.getElementById('k-models').value,
+    ip_text:document.getElementById('k-ip').value,allow_self_query:true};
+  if(!body.name){alert('请填名称');return;}
+  var j=await api('/api/user/tokens',body);
+  if(!j.ok){alert(j.error||'创建失败');return;}
+  ME.keys=j.tokens;renderKeys();
+  alert('已创建，明文只显示这一次（请立即复制）：'+String.fromCharCode(10,10)+j.token);
+}
+async function toggleKey(el){
+  var j=await api('/api/user/tokens/update',{token_id:el.dataset.id,enabled:el.dataset.next==='true'});
+  if(!j.ok){alert(j.error||'操作失败');return;}
+  ME.keys=j.tokens;renderKeys();
+}
+async function delKey(el){
+  if(!confirm('删除「'+(el.dataset.name||'这把密钥')+'」？立即失效，无法恢复。'))return;
+  var j=await api('/api/user/tokens/delete',{token_id:el.dataset.id});
+  if(!j.ok){alert(j.error||'删除失败');return;}
+  ME.keys=j.tokens;renderKeys();
+}
+
+/* ---------- 模型广场 ---------- */
 async function loadMarket(){
   var box=document.getElementById('mk-box');
-  if(!box) return;
-  var r=await fetch('/api/user/models?days=7',{credentials:'same-origin'});
-  var j=await r.json();
-  if(!j.ok){box.innerHTML='<p class="sub">'+esc(j.error||'加载失败')+'</p>';return;}
-  MARKET=j.models||[];
-  document.getElementById('mk-msg').textContent=MARKET.length+' 个模型 · 分组 '+j.group+' ×'+j.group_multiplier+(j.peak_now?'（当前峰时）':'');
+  var j=await api('/api/user/models?days=7');
+  if(!j.ok){box.innerHTML='<p class="err">'+esc(j.error||'加载失败')+'</p>';return;}
+  MARKET=j.models||[];LOADED.models=true;
+  document.getElementById('mk-msg').textContent=MARKET.length+' 个模型 · 分组 '+j.group+' ×'+j.group_multiplier+(j.peak_now?'（峰时）':'');
   renderMarket();
 }
 function renderMarket(){
-  var box=document.getElementById('mk-box'); if(!box) return;
+  var box=document.getElementById('mk-box');
   if(!MARKET.length){box.innerHTML='<p class="sub">（没有可用模型）</p>';return;}
   var q=(document.getElementById('mk-q').value||'').trim().toLowerCase();
   var key=document.getElementById('mk-sort').value;
@@ -1242,26 +1363,47 @@ function renderMarket(){
     if(key==='ok')return b.ok_rate-a.ok_rate;
     if(key==='price')return a.price_in_per_1m-b.price_in_per_1m;
     if(key==='name')return a.model.localeCompare(b.model);
-    return b.calls-a.calls;
-  });
-  box.innerHTML='<table><tr><th>模型</th><th>入 / 出（元/百万）</th><th>速度</th><th>成功率</th><th>调用</th><th>状态</th></tr>'
-    +list.map(function(m){
-      var src={mine:'',site:'<span class="sub">（全站）</span>',none:'<span class="sub">（无数据）</span>'}[m.scope]||'';
-      var state=m.warm?'<span class="tag">可用</span>':'<span class="tag" style="color:#b5770a;border-color:#b5770a">冷却中</span>';
-      return '<tr><td>'+esc(m.model)+'</td>'
-        +'<td class="mono">'+m.price_in_per_1m.toFixed(2)+' / '+m.price_out_per_1m.toFixed(2)+'</td>'
-        +'<td class="mono">'+(m.speed?m.speed.toFixed(1)+' tok/s':'—')+'</td>'
-        +'<td class="mono">'+(m.calls?(m.ok_rate.toFixed(1)+'%'):'—')+' '+src+'</td>'
-        +'<td class="mono">'+(m.calls||0)+'</td><td>'+state+'</td></tr>';
-    }).join('')+'</table>';
+    return b.calls-a.calls;});
+  box.innerHTML='<div class="mgrid">'+list.map(function(m){
+    var dot=m.warm?'#2e9e6b':'#d79a2b';
+    var src={mine:'我的实测',site:'全站数据',none:'暂无数据'}[m.scope]||'';
+    return '<div class="mcard">'
+      +'<div class="mtop"><span style="width:9px;height:9px;border-radius:50%;background:'+dot+';flex:0 0 auto"></span>'
+      +'<span class="mname" title="'+esc(m.model)+'">'+esc(m.model)+'</span></div>'
+      +'<span class="sub">'+esc(src)+(m.warm?'':' · 冷却中')+'</span>'
+      +'<div class="mrow"><span class="sub">入 / 出（元/百万）</span><b>'+m.price_in_per_1m.toFixed(2)+' / '+m.price_out_per_1m.toFixed(2)+'</b></div>'
+      +'<div class="mrow"><span class="sub">速度</span><b>'+(m.speed?m.speed.toFixed(1)+' tok/s':'—')+'</b></div>'
+      +'<div class="mrow"><span class="sub">成功率</span><b>'+(m.calls?m.ok_rate.toFixed(1)+'%':'—')+'</b></div>'
+      +'<div class="mrow"><span class="sub">调用</span><b>'+(m.calls||0)+'</b></div>'
+      +'</div>';
+  }).join('')+'</div>';
 }
-async function bindEmail(){
-  var addr=(document.getElementById('em-addr').value||'').trim();
-  var pw=document.getElementById('em-pw').value;
-  var j=await api('/api/user/email',{email:addr,password:pw});
-  if(!j.ok){alert(j.error||'绑定失败');return;}
-  alert(addr?('已绑定 '+addr):'已解绑邮箱');refresh();
+
+/* ---------- 排行榜 ---------- */
+async function loadBoard(){
+  var box=document.getElementById('lb-box');
+  var period=document.getElementById('lb-period').value;
+  var j=await api('/api/user/leaderboard?period='+encodeURIComponent(period));
+  if(!j.ok){box.innerHTML='<p class="err">'+esc(j.error||'加载失败')+'</p>';return;}
+  LOADED.board=true;
+  document.getElementById('lb-msg').textContent='共 '+j.total_calls+' 次调用';
+  if(!j.models.length){box.innerHTML='<p class="sub">（这个范围内还没有调用）</p>';return;}
+  var top=j.models[0].calls||1;
+  box.innerHTML='<div class="mgrid">'+j.models.map(function(m,i){
+    var cls=i===0?'r1':(i===1?'r2':(i===2?'r3':''));
+    return '<div class="mcard">'
+      +'<div class="mtop"><span class="mrank '+cls+'">'+(i+1)+'</span>'
+      +'<span class="mname" title="'+esc(m.model)+'">'+esc(m.model)+'</span></div>'
+      +'<span class="sub">'+esc(m.vendor)+'</span>'
+      +'<div class="mbar"><i style="width:'+Math.max(6,Math.round(m.calls/top*100))+'%"></i></div>'
+      +'<div class="mrow"><span class="sub">调用</span><b>'+m.calls+'</b></div>'
+      +'<div class="mrow"><span class="sub">tokens</span><b>'+fmtNum(m.tokens)+'</b></div>'
+      +'<div class="mrow"><span class="sub">成功率 / 速度</span><b>'+m.ok_rate.toFixed(1)+'% · '+(m.speed?m.speed.toFixed(1):'—')+'</b></div>'
+      +'</div>';
+  }).join('')+'</div>';
 }
+
+/* ---------- 日志 ---------- */
 function logQuery(){
   var d=document.getElementById('lg-days').value;
   var m=(document.getElementById('lg-model').value||'').trim();
@@ -1274,35 +1416,39 @@ function logQuery(){
 async function loadLogs(){
   var box=document.getElementById('lg-box');
   box.innerHTML='<p class="sub">加载中…</p>';
-  var r=await fetch('/api/user/logs?'+logQuery(),{credentials:'same-origin'});
-  var j=await r.json();
-  if(!j.ok){box.innerHTML='<p class="sub">'+esc(j.error||'加载失败')+'</p>';return;}
+  var j=await api('/api/user/logs?'+logQuery());
+  if(!j.ok){box.innerHTML='<p class="err">'+esc(j.error||'加载失败')+'</p>';return;}
   if(!j.entries||!j.entries.length){box.innerHTML='<p class="sub">（这个范围内没有调用）</p>';return;}
+  var rows=j.entries.slice().reverse().map(function(e){
+    var d=new Date((e.ts||0)*1000);
+    return '<tr><td class="mono nowrap">'+d.toLocaleString()+'</td><td>'+esc(e.model||'-')+'</td>'
+      +'<td class="nowrap">'+(e.ok?'<span class="tag ok">成功</span>':'<span class="tag warn">失败</span>')+'</td>'
+      +'<td class="mono nowrap">'+fmtNum(e.tokens_in)+' → '+fmtNum(e.tokens_out)+'</td>'
+      +'<td class="mono nowrap">'+(e.latency_ms||0)+'ms</td><td class="mono">'+(e.cost||0)+'</td></tr>';
+  }).join('');
   box.innerHTML='<p class="sub">共 '+j.total+' 条'+(j.total>j.entries.length?'（显示最近 '+j.entries.length+' 条）':'')+'</p>'
-    +'<table><tr><th>时间</th><th>模型</th><th>结果</th><th>tokens</th><th>耗时</th><th>扣点</th></tr>'
-    +j.entries.slice().reverse().map(function(e){
-      var d=new Date((e.ts||0)*1000);
-      return '<tr><td class="mono">'+d.toLocaleString()+'</td><td>'+esc(e.model||'-')+'</td>'
-        +'<td>'+(e.ok?'成功':'失败')+'</td>'
-        +'<td class="mono">'+(e.tokens_in||0)+'&rarr;'+(e.tokens_out||0)+'</td>'
-        +'<td class="mono">'+(e.latency_ms||0)+'ms</td><td class="mono">'+(e.cost||0)+'</td></tr>';
-    }).join('')+'</table>';
+    +'<table><thead><tr><th>时间</th><th>模型</th><th>结果</th><th>tokens</th><th>耗时</th><th>扣点</th></tr></thead><tbody>'+rows+'</tbody></table>';
 }
-function exportLogs(){ location.href='/api/user/logs?'+logQuery()+'&format=csv'; }
+function exportLogs(){location.href='/api/user/logs?'+logQuery()+'&format=csv';}
+
+/* ---------- 审计 ---------- */
 async function loadAudit(){
   var box=document.getElementById('au-box');
-  var r=await fetch('/api/user/audit?limit=100',{credentials:'same-origin'});
-  var j=await r.json();
-  if(!j.ok){box.innerHTML='<p class="sub">'+esc(j.error||'加载失败')+'</p>';return;}
+  var j=await api('/api/user/audit?limit=100');
+  if(!j.ok){box.innerHTML='<p class="err">'+esc(j.error||'加载失败')+'</p>';return;}
+  LOADED.audit=true;
   if(!j.events||!j.events.length){box.innerHTML='<p class="sub">（还没有记录）</p>';return;}
-  box.innerHTML='<table><tr><th>时间</th><th>操作</th><th>来源 IP</th></tr>'
-    +j.events.map(function(e){
-      var d=new Date((e.ts||0)*1000);
-      return '<tr><td class="mono">'+d.toLocaleString()+'</td><td class="mono">'+esc(e.event)+'</td><td class="mono">'+esc(e.ip||'-')+'</td></tr>';
-    }).join('')+'</table>';
+  var rows=j.events.map(function(e){
+    var d=new Date((e.ts||0)*1000);
+    return '<tr><td class="mono nowrap">'+d.toLocaleString()+'</td>'
+      +'<td class="mono">'+esc(e.event)+'</td><td class="mono">'+esc(e.ip||'-')+'</td></tr>';
+  }).join('');
+  box.innerHTML='<table><thead><tr><th>时间</th><th>操作</th><th>来源 IP</th></tr></thead><tbody>'+rows+'</tbody></table>';
 }
+
+/* ---------- 安全 ---------- */
 async function changePassword(){
-  var o=document.getElementById('pw-old').value, n=document.getElementById('pw-new').value;
+  var o=document.getElementById('pw-old').value,n=document.getElementById('pw-new').value;
   if(n.length<8){alert('新密码至少 8 位');return;}
   var j=await api('/api/user/password',{old_password:o,new_password:n});
   if(!j.ok){alert(j.error||'修改失败');return;}
@@ -1312,41 +1458,72 @@ async function changePassword(){
 async function revokeSessions(){
   if(!confirm('让其他设备上的登录全部失效？'))return;
   var j=await api('/api/user/sessions/revoke',{});
+  alert(j.ok?('已退出 '+(j.revoked_sessions||0)+' 个会话'):(j.error||'操作失败'));
+}
+async function bindEmail(){
+  var addr=(document.getElementById('em-addr').value||'').trim();
+  var j=await api('/api/user/email',{email:addr,password:document.getElementById('em-pw').value});
+  if(!j.ok){alert(j.error||'保存失败');return;}
+  ME.email=addr;document.getElementById('em-pw').value='';
+  alert(addr?('已绑定 '+addr):'已解绑邮箱');
+}
+
+/* ---------- 兑换 / 主 Key ---------- */
+async function doRedeem(){
+  var j=await api('/api/user/redeem',{code:(document.getElementById('code').value||'').trim()});
+  if(!j.ok){alert(j.error||'兑换失败');return;}
+  document.getElementById('code').value='';
+  alert('兑换成功，+'+j.credits+' 点');
+  boot();
+}
+async function doRotate(){
+  if(!confirm('重置主 Key？旧 Key 立即失效。'))return;
+  var j=await api('/api/user/rotate-key',{});
   if(!j.ok){alert(j.error||'操作失败');return;}
-  alert('已退出 '+(j.revoked_sessions||0)+' 个会话');
+  alert('新主 Key（只显示这一次）：'+String.fromCharCode(10,10)+j.token);
 }
-async function createKey(){
-  var body={name:(document.getElementById('k-name').value||'').trim(),
-    quota_tokens:parseInt(document.getElementById('k-quota').value,10)||0,
-    days:parseInt(document.getElementById('k-days').value,10)||0,
-    models_text:document.getElementById('k-models').value,
-    ip_text:document.getElementById('k-ip').value,
-    allow_self_query:document.getElementById('k-self').checked};
-  if(!body.name){alert('请填名称');return;}
-  var j=await api('/api/user/tokens',body);
-  if(!j.ok){alert(j.error||'创建失败');return;}
-  showKey(j.token);
+
+/* ---------- 公告 ---------- */
+async function loadAnnouncements(){
+  try{
+    var r=await fetch('/public/announcements');var a=await r.json();
+    var box=document.getElementById('ann');if(!box)return;
+    var items=(a&&a.items)||[];
+    box.innerHTML=items.slice(0,3).map(function(x){
+      return '<div class="ann '+(x.level||'info')+'">'+(x.pinned?'<b>置顶</b> · ':'')+esc(x.text)+'</div>';
+    }).join('');
+  }catch(e){}
 }
-async function toggleKey(el){
-  var j=await api('/api/user/tokens/update',{token_id:el.dataset.id,enabled:el.dataset.next==='true'});
-  if(!j.ok){alert(j.error||'操作失败');return;} refresh();
+
+/* ---------- 启动 ---------- */
+async function boot(){
+  var j=await api('/api/user/me');
+  if(!j||j.ok===false&&j.error){renderAuth(false);return;}
+  if(!j.username&&!j.ok){renderAuth(false);return;}
+  ME=j;
+  document.getElementById('auth').style.display='none';
+  document.getElementById('app').style.display='grid';
+  renderOverview(j);
+  document.getElementById('em-addr').value=j.email||'';
+  var h=(location.hash||'').replace('#','');
+  show(['overview','keys','models','board','logs','audit','secure'].indexOf(h)>=0?h:'overview');
+  loadAnnouncements();
 }
-async function delKey(el){
-  var name=el.dataset.name||'这把密钥';
-  if(!confirm('删除「'+name+'」？该密钥立即失效，无法恢复。'))return;
-  var j=await api('/api/user/tokens/delete',{token_id:el.dataset.id});
-  if(!j.ok){alert(j.error||'删除失败');return;} refresh();
-}
-async function doRotate(){if(!confirm('旧 Key 立即失效，确定？'))return;
-  var j=await api('/api/user/rotate-key',{});if(j.ok){showKey(j.token);refresh();}}
-function showKey(t){h('<h2>你的新 API Key</h2><p class="sub">只显示这一次，立即复制保存</p>'+
-  '<dl><dt>Key</dt><dd>'+esc(t)+'</dd></dl><button onclick="refresh()">我已保存，返回面板</button>');}
-async function logout(){await api('/api/auth/logout',{});renderAuth(false);}
-refresh().then(function(){
-  if(document.getElementById('mk-box')) loadMarket();
-  if(document.getElementById('au-box')) loadAudit();
-});
-</script></body></html>"""
+document.getElementById('redeem').onclick=doRedeem;
+document.getElementById('rotate').onclick=doRotate;
+document.getElementById('mk-refresh').onclick=loadMarket;
+document.getElementById('mk-q').oninput=renderMarket;
+document.getElementById('mk-sort').onchange=renderMarket;
+document.getElementById('lb-period').onchange=loadBoard;
+document.getElementById('lg-go').onclick=loadLogs;
+document.getElementById('lg-csv').onclick=exportLogs;
+document.getElementById('pw-go').onclick=changePassword;
+document.getElementById('sess-revoke').onclick=revokeSessions;
+document.getElementById('em-go').onclick=bindEmail;
+boot();
+</script>
+</body></html>
+"""
 
 
 # ---------------------------------------------------------------- HTTP 层
@@ -2520,13 +2697,16 @@ class RelayHandler(BaseHTTPRequestHandler):
         if path == "/panel":
             panel = _apply_panel_theme(PANEL_HTML)
             panel = panel.replace("</head>", _theme_vars(site_module.load_site(paths.site_path())) + "</head>", 1)
-            self._send_html(panel + ANNOUNCEMENT_SCRIPT)
+            self._send_html(panel)
             return
         if path == "/api/user/tokens":
             self._user_tokens_list()
             return
         if path == "/api/user/models":
             self._user_models_market()
+            return
+        if path == "/api/user/leaderboard":
+            self._user_leaderboard()
             return
         if path == "/api/user/audit":
             self._user_audit()
@@ -2844,7 +3024,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         names = {t.name for t in self._own_tokens(user)}
         cutoff = time.time() - days * 86400
         try:
-            rows = reqlog.tail(self.server.requests_log_path, limit=4000)  # type: ignore[attr-defined]
+            rows = reqlog.tail(Path(self.request_log), limit=4000) if self.request_log else []  # type: ignore[attr-defined]
         except Exception:
             rows = []
         mine: dict[str, list[dict]] = {}
@@ -2901,6 +3081,92 @@ class RelayHandler(BaseHTTPRequestHandler):
             "group_multiplier": mult,
             "peak_now": now_mult > 1.0,
             "models": out,
+        })
+
+    _VENDOR_PATTERNS: tuple[tuple[str, str], ...] = (
+        ("claude", "Anthropic"), ("anthropic", "Anthropic"),
+        ("gpt", "OpenAI"), ("o1", "OpenAI"), ("o3", "OpenAI"), ("o4", "OpenAI"),
+        ("gemini", "Google"), ("gemma", "Google"),
+        ("deepseek", "DeepSeek"),
+        ("glm", "Z.AI"), ("zhipu", "Z.AI"),
+        ("qwen", "Alibaba"), ("qwq", "Alibaba"),
+        ("kimi", "Moonshot"), ("moonshot", "Moonshot"),
+        ("grok", "xAI"), ("doubao", "ByteDance"),
+        ("mimo", "Xiaomi"), ("minimax", "MiniMax"), ("step", "StepFun"),
+    )
+
+    def _vendor_of(self, model: str) -> str:
+        low = model.lower()
+        for needle, vendor in self._VENDOR_PATTERNS:
+            if low.startswith(needle) or needle in low:
+                return vendor
+        return "其他"
+
+    def _user_leaderboard(self) -> None:
+        """排行榜：按模型/厂商聚合调用量与 tokens（全站口径，仅聚合数）。
+
+        隐私边界：只出计数与速率，不出任何用户名、令牌名、IP——排行本身就是
+        公开榜单，但明细属于个人。样本不足的车次直接不列入（避免 1 次调用登顶）。
+        """
+        user = self._session_user()
+        if user is None:
+            self._send_json(401, {"ok": False, "error": "请先登录"})
+            return
+        query = parse_qs(urlsplit(self.path).query)
+        period = str((query.get("period") or ["week"])[0])
+        days = {"today": 1, "week": 7, "month": 30}.get(period, 7)
+        # 「今天」按自然日算，不是滚动 24 小时
+        cutoff = time.time() - days * 86400 if period != "today" else time.time() - (time.time() % 86400)
+
+        try:
+            rows = reqlog.tail(Path(self.request_log), limit=6000) if self.request_log else []  # type: ignore[attr-defined]
+        except Exception:
+            rows = []
+
+        agg: dict[str, dict] = {}
+        for e in rows:
+            if float(e.get("ts") or 0) < cutoff:
+                continue
+            model = str(e.get("model") or "")
+            if not model:
+                continue
+            item = agg.setdefault(model, {"calls": 0, "ok": 0, "tokens": 0, "speeds": []})
+            item["calls"] += 1
+            if e.get("ok"):
+                item["ok"] += 1
+                ms = float(e.get("latency_ms") or 0)
+                out = float(e.get("tokens_out") or 0)
+                if ms > 200 and out > 0:
+                    item["speeds"].append(out / (ms / 1000.0))
+            item["tokens"] += int(e.get("tokens_in") or 0) + int(e.get("tokens_out") or 0)
+
+        models = []
+        for name, it in agg.items():
+            speeds = sorted(it["speeds"])
+            models.append({
+                "model": name,
+                "vendor": self._vendor_of(name),
+                "calls": it["calls"],
+                "tokens": it["tokens"],
+                "ok_rate": round(it["ok"] / it["calls"] * 100, 1) if it["calls"] else 0.0,
+                "speed": round(speeds[len(speeds) // 2], 1) if speeds else 0.0,
+            })
+        models.sort(key=lambda m: (-m["calls"], -m["tokens"]))
+
+        vendors: dict[str, dict] = {}
+        for m in models:
+            v = vendors.setdefault(m["vendor"], {"vendor": m["vendor"], "calls": 0, "tokens": 0, "models": 0})
+            v["calls"] += m["calls"]
+            v["tokens"] += m["tokens"]
+            v["models"] += 1
+        vendor_list = sorted(vendors.values(), key=lambda v: -v["calls"])
+
+        self._send_json(200, {
+            "ok": True,
+            "period": period,
+            "models": models[:15],
+            "vendors": vendor_list[:8],
+            "total_calls": sum(m["calls"] for m in models),
         })
 
     def _user_audit(self) -> None:
@@ -2960,7 +3226,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         cutoff = time.time() - days * 86400
         limit = 5000 if want_csv else 300
         try:
-            rows = reqlog.tail(self.server.requests_log_path, limit=limit * 3)  # type: ignore[attr-defined]
+            rows = reqlog.tail(Path(self.request_log), limit=limit * 3) if self.request_log else []
         except Exception:
             rows = []
         entries = []

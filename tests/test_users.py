@@ -465,3 +465,19 @@ def test_model_market_shows_my_price_and_marks_warm(panel_relay) -> None:
         if m["calls"] == 0:
             assert m["ok_rate"] == 0.0 and m["speed"] == 0.0
         assert isinstance(m["warm"], bool)
+
+
+def test_leaderboard_aggregates_without_leaking_users(panel_relay) -> None:
+    """排行榜：只出聚合数，不出现用户名/令牌名。"""
+    server, _ = panel_relay
+    base = server.base_url
+    _, _, h = _call(base, "/api/auth/register", {"username": "quin", "password": "password8"})
+    sid = h["Set-Cookie"].split("rh_session=")[1].split(";")[0]
+
+    for period in ("today", "week", "month"):
+        status, body, _ = _call(base, f"/api/user/leaderboard?period={period}", cookie=sid)
+        assert status == 200 and body["ok"] and body["period"] == period
+        for m in body["models"]:
+            assert set(m) >= {"model", "vendor", "calls", "tokens", "ok_rate", "speed"}
+        dumped = json.dumps(body, ensure_ascii=False)
+        assert "quin" not in dumped and "user-quin" not in dumped
