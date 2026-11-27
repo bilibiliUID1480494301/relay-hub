@@ -49,7 +49,14 @@ from . import toip as toip_module
 from .router import RelayOutcome, RouterError
 
 ident_module = None  # 未安装客户端扩展包时的占位：身份头整段跳过
-from .tokens import SCOPE_TEST, DownstreamToken, TokenStore, generate_token, TokenError
+from .tokens import (
+    SCOPE_TEST,
+    DownstreamToken,
+    TokenError,
+    TokenStore,
+    generate_token,
+    normalize_client_ip,
+)
 from .upstream import (
     UpstreamError,
     cache_from_usage,
@@ -2300,11 +2307,13 @@ class RelayHandler(BaseHTTPRequestHandler):
         if forwarded:
             first = forwarded.split(",")[0].strip()
             if first:
-                return first
+                # 反代常带方括号/端口（[2001:db8::1]:443），不归一化会让
+                # IP 白名单误拒、按 IP 限流把同一来源算成很多个
+                return normalize_client_ip(first)
         real = (self.headers.get("X-Real-IP") or "").strip()
         if real:
-            return real
-        return self.client_address[0]
+            return normalize_client_ip(real)
+        return normalize_client_ip(self.client_address[0])
 
     def _handle_pair(self) -> None:
         """POST /v1/pair：发放下游令牌 + onboarding 载荷。

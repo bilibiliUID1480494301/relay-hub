@@ -111,6 +111,30 @@ def _client_ip_networks(entries: tuple[str, ...]) -> list:
     return nets
 
 
+def normalize_client_ip(text: object) -> str:
+    """把各种来源的 IP 文本归一成裸地址。
+
+    反代常见形态：
+      * `[2001:db8::1]:443`  —— nginx 的 $remote_addr 带端口时
+      * `[2001:db8::1]`      —— 只要地址但保留了方括号
+      * `2001:db8::1%eth0`   —— 链路本地地址带 scope
+      * `1.2.3.4:5678`       —— IPv4 带端口
+
+    注意**不能**对裸 IPv6 剥端口：`2001:db8::1:443` 本身就是一个合法地址，
+    按「最后一个冒号后面」去截会把地址改坏。
+    """
+    s = str(text or "").strip().strip('"').strip("'")
+    if not s:
+        return ""
+    if s.startswith("[") and "]" in s:
+        s = s[1:s.index("]")]
+    elif s.count(":") == 1 and "." in s:      # 仅 IPv4 才可能是 host:port
+        s = s.split(":", 1)[0]
+    if "%" in s:                              # 去掉 scope id
+        s = s.split("%", 1)[0]
+    return s
+
+
 @dataclass
 class DownstreamToken:
     token_id: str
@@ -183,7 +207,7 @@ class DownstreamToken:
         import ipaddress
 
         try:
-            addr = ipaddress.ip_address(str(ip or "").strip())
+            addr = ipaddress.ip_address(normalize_client_ip(ip))
         except ValueError:
             return False
         # 反代常见：::ffff:1.2.3.4，按 v4 比对

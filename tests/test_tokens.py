@@ -335,3 +335,26 @@ def test_token_quota_counts_both_directions() -> None:
         pass
     else:
         raise AssertionError("负额度应当报错")
+
+
+def test_ipv6_allowlist_and_proxy_forms() -> None:
+    """IPv6 支持：CIDR、环回、IPv4-mapped，以及反代常见的带括号/端口写法。"""
+    from relayhub.gateway.tokens import DownstreamToken, normalize_client_ip
+
+    # 归一化：只剥方括号/端口，不碰裸 IPv6（2001:db8::1:443 是合法地址）
+    assert normalize_client_ip("[2001:db8::1]:443") == "2001:db8::1"
+    assert normalize_client_ip("[2001:db8::1]") == "2001:db8::1"
+    assert normalize_client_ip("2001:db8::1:443") == "2001:db8::1:443"
+    assert normalize_client_ip("1.2.3.4:5678") == "1.2.3.4"
+    assert normalize_client_ip("fe80::1%eth0") == "fe80::1"
+    assert normalize_client_ip("  ::1  ") == "::1"
+
+    tok = DownstreamToken(token_id="v6", name="v6", token="x",
+                          ip_allowlist=("2001:db8::/32", "::1", "10.0.0.0/8"))
+    assert tok.ip_allowed("2001:db8::1")
+    assert tok.ip_allowed("[2001:db8::1]:443")
+    assert tok.ip_allowed("::1")
+    assert tok.ip_allowed("[::1]:8080")
+    assert tok.ip_allowed("::ffff:10.0.0.5")      # 双栈监听下的 IPv4-mapped
+    assert not tok.ip_allowed("2001:db9::1")
+    assert not tok.ip_allowed("8.8.8.8")
