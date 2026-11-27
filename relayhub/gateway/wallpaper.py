@@ -104,7 +104,17 @@ def normalize(config: dict[str, Any] | None) -> dict[str, Any]:
     if mode == "api" and not api_url:
         mode = "static" if images else "static"
 
+    raw_opacity = cfg.get("bg_opacity", 1.0)
+    if raw_opacity is None or raw_opacity == "":
+        raw_opacity = 1.0
+    try:
+        opacity = float(raw_opacity)
+    except (TypeError, ValueError):
+        opacity = 1.0
+    opacity = min(1.0, max(0.05, opacity))
+
     return {
+        "opacity": round(opacity, 2),
         "mode": mode,
         "images": images[:MAX_IMAGES],
         "seconds": clamp_seconds(cfg.get("bg_rotate_seconds") or DEFAULT_SECONDS),
@@ -201,5 +211,14 @@ def body_css(config: dict[str, Any] | None) -> str:
         css += (
             f"background-size:{fit};background-repeat:no-repeat;"
             "background-attachment:fixed;background-position:center;"
+        )
+    # 透明度：壁纸太抢眼时用它压淡。用 z-index:-1 的固定层盖在背景上，
+    # 不参与内容层叠，所以表格文字不受影响。
+    if image and wp["opacity"] < 1.0:
+        fade = round(1.0 - wp["opacity"], 2)
+        css += (
+            "body::after{content:\"\";position:fixed;inset:0;z-index:-1;pointer-events:none;"
+            f"background:#f6f7f9;opacity:{fade};}}"
+            "@media(prefers-color-scheme:dark){body::after{background:#101113}}"
         )
     return css

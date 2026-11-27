@@ -121,3 +121,23 @@ def test_panel_without_config_uses_default_bg(tmp_path: Path) -> None:
             html = _panel_html(panel)
             assert "background:#F7F6F3;" in html
             assert "__THEME_BG__" not in html
+
+
+def test_wallpaper_opacity_clamped_and_emits_fade_layer() -> None:
+    """透明度：越界被夹住；<1 时输出只压背景的 ::after 层（不压内容）。"""
+    from relayhub.gateway import wallpaper
+
+    assert wallpaper.normalize({"bg_opacity": 0}).get("opacity") == 0.05
+    assert wallpaper.normalize({"bg_opacity": 5}).get("opacity") == 1.0
+    assert wallpaper.normalize({"bg_opacity": "bad"}).get("opacity") == 1.0
+    assert wallpaper.normalize({"bg_opacity": 0.4}).get("opacity") == 0.4
+
+    cfg = {"bg_image": "https://example.com/a.jpg", "bg_opacity": 0.4}
+    css = wallpaper.body_css(cfg)
+    assert "background-image:url('https://example.com/a.jpg')" in css
+    assert "body::after" in css and "opacity:0.6" in css
+    assert "z-index:-1" in css          # 必须在内容层之下
+
+    # 不透明度 1 时不加淡出层（少一层合成）
+    full = wallpaper.body_css({"bg_image": "https://example.com/a.jpg", "bg_opacity": 1})
+    assert "body::after" not in full

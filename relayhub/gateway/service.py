@@ -908,8 +908,21 @@ def _panel_wallpaper() -> dict:
 def _apply_panel_theme(html: str) -> str:
     """把背景 CSS 与壁纸脚本注入面板模板（不铺伪元素层：它会盖住内容）。"""
     bg = _panel_bg_css()
-    script = wallpaper_module.rotate_script(_panel_wallpaper())
+    cfg = _panel_wallpaper()
+    script = wallpaper_module.rotate_script(cfg)
     html = html.replace("__THEME_BG__", bg, 1)
+    if cfg.get("images"):
+        # 面板卡片默认不透明，壁纸只在登录页露出来。有壁纸时把 --panel 换成
+        # 半透明并加一点背景模糊：既看得见图，表格文字也不糊。
+        html = html.replace(
+            "</head>",
+            "<style id=\"rh-panel-glass\">"
+            ":root{--panel:rgba(255,255,255,.86)}"
+            "@media(prefers-color-scheme:dark){:root{--panel:rgba(23,24,27,.86)}}"
+            ".card,.stat,#pn{backdrop-filter:blur(6px)}"
+            "</style></head>",
+            1,
+        )
     if script:
         if "__THEME_JS__" in html:
             html = html.replace("__THEME_JS__", script, 1)
@@ -1160,7 +1173,8 @@ font-size:11.5px;font-weight:700;background:#f1f2f4;color:#5F5E5A;flex:0 0 auto}
       </div>
       <div class="card">
         <h3 style="margin-top:0">背景</h3>
-        <div id="bgbox"></div>
+        <p class="sub" style="margin:0">站点背景由站长在管理面「公网面板外观」统一设置（颜色、图片、透明度）。
+          个人侧不单独覆盖，避免每个页面风格漂移。</p>
       </div>
     </section>
   </main>

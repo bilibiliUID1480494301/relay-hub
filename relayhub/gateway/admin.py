@@ -2325,6 +2325,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             ),
             "bg_api_allow_http": bool(raw.get("bg_api_allow_http")),
             "bg_fit": str(raw.get("bg_fit") or "cover"),
+            "bg_opacity": wallpaper_module.normalize(raw).get("opacity", 1.0),
         }
 
     def _update_webui(self) -> None:
@@ -2359,7 +2360,16 @@ class AdminHandler(BaseHTTPRequestHandler):
         if fit not in ("cover", "contain"):
             self._error(400, "壁纸填充方式只能是 cover / contain")
             return
+        try:
+            opacity = float(body.get("bg_opacity", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            self._error(400, "背景透明度必须是 0.05~1 之间的数字")
+            return
+        if not 0.05 <= opacity <= 1.0:
+            self._error(400, "背景透明度必须在 0.05~1 之间")
+            return
         payload = {
+            "bg_opacity": round(opacity, 2),
             "bg_color": color,
             "bg_fit": fit,
             "bg_image": image,
@@ -3214,6 +3224,10 @@ tbody tr:hover td{ background:var(--accent-soft); }
   </div>
   <div class="row">
     <input id="th-image" placeholder="背景图 URL，如 https://example.com/bg.jpg（留空=无）" style="flex:1">
+  </div>
+  <div class="row">
+    <label style="flex:0 0 260px">背景透明度 <input id="th-opacity" type="range" min="0.05" max="1" step="0.05" value="1" style="height:auto"></label>
+    <span class="hint" id="th-opacity-val">100%</span>
   </div>
   <div class="row"><button id="th-save">保存外观</button><button id="th-load" class="ghost">读取当前</button></div>
   <p class="hint" id="th-msg"></p>
@@ -4218,12 +4232,18 @@ function loadTheme(){
   api('GET','/api/webui').then(function(s){
     document.getElementById('th-color').value=s.bg_color||'';
     document.getElementById('th-image').value=s.bg_image||'';
+    var op=(s.bg_opacity!=null?s.bg_opacity:1);
+    document.getElementById('th-opacity').value=op;
+    document.getElementById('th-opacity-val').textContent=Math.round(op*100)+'%';
   }).catch(function(e){toast('读取失败：'+e.message,false);});
 }
+document.getElementById('th-opacity').oninput=function(){
+  document.getElementById('th-opacity-val').textContent=Math.round(this.value*100)+'%';};
 document.getElementById('th-load').onclick=loadTheme;
 document.getElementById('th-save').onclick=function(){
   var body={bg_color:document.getElementById('th-color').value.trim(),
-            bg_image:document.getElementById('th-image').value.trim()};
+            bg_image:document.getElementById('th-image').value.trim(),
+            bg_opacity:parseFloat(document.getElementById('th-opacity').value)};
   api('POST','/api/webui',body).then(function(s){
     document.getElementById('th-msg').textContent='已保存，刷新 /panel 即可看到新背景。';
     toast('外观已保存',true);
