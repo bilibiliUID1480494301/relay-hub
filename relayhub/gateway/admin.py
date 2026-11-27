@@ -2651,9 +2651,18 @@ color:var(--fg);border-radius:8px;padding:8px 10px;display:flex;align-items:cent
 .dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:0 0 auto}
 .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
 @media(max-width:820px){
-  .wrap{grid-template-columns:minmax(0,1fr)}
-  #tabs{grid-column:1;grid-row:auto;flex-direction:row;flex-wrap:wrap;position:static}
+  .wrap{grid-template-columns:minmax(0,1fr);padding:14px}
+  #tabs{grid-column:1;grid-row:auto;flex-direction:row;flex-wrap:wrap;position:static;
+        gap:4px;padding:6px}
+  #tabs button{width:auto;flex:1 1 30%;justify-content:center;text-align:center;
+               font-size:12.5px;padding:0 8px}
   .pane{grid-column:1;grid-row:auto}
+  /* 管理面表格多且宽：窄屏让面板自己横向滚动 */
+  .panel{overflow-x:auto}
+  .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .row{gap:8px}
+  .row label{flex:1 1 100%}
+  .mgrid{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}
 }
 
 header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:18px}
@@ -2814,6 +2823,24 @@ tbody tr:hover td{ background:var(--accent-soft); }
 .mstats span{ font-size:10.5px; color:var(--muted); }
 .mstats.empty{ font-size:11.5px; color:var(--muted); padding-top:2px; }
 .mdot{ width:7px; height:7px; border-radius:50%; flex:0 0 auto; }
+
+/* 窄屏兜底：必须放在皮肤之后，否则 .wrap 的 196px 栅格会把早先的媒体查询顶掉 */
+@media(max-width:820px){
+  .wrap.wrap{grid-template-columns:minmax(0,1fr);padding:14px}
+  #tabs{position:static;flex-direction:row;flex-wrap:wrap;gap:4px}
+  #tabs button{width:auto;flex:1 1 30%;justify-content:center;text-align:center;
+               font-size:12px;padding:0 6px}
+  .pane{grid-column:1;grid-row:auto;min-width:0}
+  .panel{overflow-x:auto;min-width:0}
+  .cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  .row label{flex:1 1 100%}
+  .mgrid{grid-template-columns:repeat(auto-fill,minmax(190px,1fr))}
+}
+@media(max-width:420px){
+  #tabs button{flex:1 1 46%;font-size:11.5px}
+  .cards{display:grid;grid-template-columns:minmax(0,1fr)}
+  .row>button{flex:1 1 100%}
+}
 </style>
 </head>
 <body>

@@ -1046,11 +1046,29 @@ font-size:11.5px;font-weight:700;background:#f1f2f4;color:#5F5E5A;flex:0 0 auto}
 .ann.warning{background:#fdf3e2;border-color:var(--warn)}
 .ann.critical{background:#fdeceb;border-color:var(--bad)}
 @media(max-width:860px){
-  .shell{grid-template-columns:minmax(0,1fr);padding:14px}
+  .shell{grid-template-columns:minmax(0,1fr);padding:14px;gap:12px}
   aside{position:static}
-  #pn{flex-direction:row;flex-wrap:wrap}
-  #pn button{flex:1 1 40%}
+  .brand{padding:2px 6px 8px}
+  #pn{flex-direction:row;flex-wrap:wrap;gap:4px}
+  main,.pane,.card{min-width:0}      /* 否则表格的 min-content 会把整页撑宽 */
+  #pn button{flex:1 1 calc(50% - 6px);text-align:center;padding:0 6px;font-size:12px;
+             white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* 表格在窄屏横向滚动，宁可滑动也不让单元格挤成竖排 */
+  .card{overflow-x:auto}
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .row label{flex:1 1 100%}
+  .row>button{flex:1 1 auto}
+  .mcard{padding:11px 12px}
+  h2{font-size:15px}
 }
+@media(max-width:420px){
+  .stats{grid-template-columns:minmax(0,1fr)}
+  .stat .v{font-size:17px}
+  .row>button{flex:1 1 100%}       /* 窄屏按钮整行，避免两个挤成一条 */
+  #pn button{font-size:11.5px;padding:0 4px}
+}
+/* 统计卡标签：宁可省略也不要折成两行 */
+.stat .k{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 </style>
 </head>
 <body>
