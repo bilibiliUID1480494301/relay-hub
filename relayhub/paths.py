@@ -200,3 +200,13 @@ def launch_sandbox_dir() -> Path:
 
 
 
+
+
+def mail_path() -> Path:
+    """SMTP 配置（含密码，靠文件权限保护）。"""
+    return relayhub_home() / "mail.json"
+
+
+def verify_codes_path() -> Path:
+    """邮箱验证码（只存哈希）。"""
+    return relayhub_home() / "email_codes.json"

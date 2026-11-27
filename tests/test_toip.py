@@ -862,7 +862,16 @@ def test_console_toip_state_hides_secret_but_shows_code(tmp_path: Path) -> None:
             assert status == 200, payload
             assert payload["enabled"] is True
             assert payload["station"]["station_id"] == station.station_id
-            assert payload["station"]["current_code"] == toip.totp_now(station.secret_bytes)
+            # 跨 30 秒边界时服务端与测试算的是相邻窗口，两个都算对——
+            # 早先直接比对当前窗口，整点附近偶发失败（不是代码问题，是时间在动）
+            import time as _time
+
+            _now = _time.time()
+            _ok_codes = {
+                toip.totp_at(station.secret_bytes, at=_now - 30),
+                toip.totp_at(station.secret_bytes, at=_now),
+            }
+            assert payload["station"]["current_code"] in _ok_codes
             assert payload["station"]["seconds_left"] > 0
             blob = json.dumps(payload, ensure_ascii=False)
             assert station.secret not in blob, "管理台泄露了口令种子"

@@ -31,6 +31,7 @@ from .. import paths
 from . import drift as drift_module
 from .. import __version__ as relayhub_version
 from . import audit as audit_module
+from . import mailer as mailer_module
 from . import a2a as a2a_module
 from . import e2e as e2e_module
 from . import mcp as mcp_module
@@ -1237,15 +1238,27 @@ function renderAuth(showRegister){
   document.getElementById('app').style.display='none';
   document.getElementById('auth').style.display='flex';
   var box=document.getElementById('authbox');
+  var mailRow=showRegister
+    ?'<label style="margin-top:8px">邮箱<input id="a-mail" type="email" autocomplete="email"></label>'
+     +'<div class="row" style="margin-top:8px;align-items:flex-end">'
+     +'<label style="flex:1 1 120px">验证码<input id="a-code" inputmode="numeric" maxlength="6"></label>'
+     +'<button class="ghost" id="a-send" style="flex:0 0 auto">获取验证码</button></div>'
+     +'<p class="sub" style="margin:2px 0 0">本站开启邮件服务时必须填验证码；未开启时留空即可。</p>'
+    :'';
   box.innerHTML='<h2>'+(showRegister?'注册账号':'登录')+'</h2>'
     +'<p class="sub">'+(showRegister?'注册后自动获得一把 API Key':'用站点账号登录，管理你自己的密钥')+'</p>'
     +'<label>用户名<input id="a-user" autocomplete="username"></label>'
     +'<label style="margin-top:8px">密码<input id="a-pass" type="password" autocomplete="current-password"></label>'
+    + mailRow
     +'<div class="err" id="a-err"></div>'
-    +'<button class="primary" style="width:100%;margin-top:6px" id="a-go">'+(showRegister?'注册':'登录')+'</button>'
+    +'<button class="primary" style="width:100%;margin-top:10px" id="a-go">'+(showRegister?'注册':'登录')+'</button>'
     +'<p class="sub" style="margin-top:12px">'
       +(showRegister?'已有账号？<button class="link" id="a-switch">去登录</button>'
-                    :'没有账号？<button class="link" id="a-switch">注册</button>')+'</p>';
+                    :'没有账号？<button class="link" id="a-switch">注册</button> · <button class="link" id="a-forgot">忘记密码</button>')+'</p>';
+  if(showRegister&&document.getElementById('a-send')) sendCodeButton('a-send','a-mail','register');
+  if(!showRegister&&document.getElementById('a-forgot')){
+    document.getElementById('a-forgot').onclick=function(){renderReset();};
+  }
   document.getElementById('a-go').onclick=function(){showRegister?doRegister():doLogin();};
   document.getElementById('a-switch').onclick=function(){renderAuth(!showRegister);};
   document.getElementById('a-pass').onkeydown=function(e){if(e.key==='Enter')(showRegister?doRegister:doLogin)();};
@@ -1257,10 +1270,63 @@ async function doLogin(){
   boot();
 }
 async function doRegister(){
-  var j=await api('/api/auth/register',{username:document.getElementById('a-user').value.trim(),
-    password:document.getElementById('a-pass').value});
+  var body={username:document.getElementById('a-user').value.trim(),
+    password:document.getElementById('a-pass').value};
+  if(document.getElementById('a-mail')) body.email=document.getElementById('a-mail').value.trim();
+  if(document.getElementById('a-code')) body.code=document.getElementById('a-code').value.trim();
+  var j=await api('/api/auth/register',body);
   if(!j.ok){document.getElementById('a-err').textContent=j.error||'注册失败';return;}
   boot();
+}
+
+/* 验证码按钮：60 秒倒计时，避免连点把邮件发爆 */
+function sendCodeButton(btnId,mailId,purpose){
+  var btn=document.getElementById(btnId);
+  if(!btn) return;
+  btn.onclick=async function(){
+    var email=(document.getElementById(mailId).value||'').trim();
+    if(!email){document.getElementById('a-err').textContent='请先填邮箱';return;}
+    btn.disabled=true;
+    var j=await api('/api/auth/email/code',{email:email,purpose:purpose});
+    if(!j.ok){
+      document.getElementById('a-err').textContent=j.error||'发送失败';
+      btn.disabled=false;return;
+    }
+    document.getElementById('a-err').textContent='验证码已发送，请查收（含垃圾箱）';
+    var left=60;btn.textContent=left+'s';
+    var timer=setInterval(function(){
+      left--;btn.textContent=left+'s';
+      if(left<=0){clearInterval(timer);btn.disabled=false;btn.textContent='获取验证码';}
+    },1000);
+  };
+}
+
+/* 忘记密码：邮箱 + 验证码 + 新密码 */
+function renderReset(){
+  document.getElementById('app').style.display='none';
+  document.getElementById('auth').style.display='flex';
+  document.getElementById('authbox').innerHTML='<h2>重置密码</h2>'
+    +'<p class="sub">用注册邮箱收验证码，验证通过后设置新密码。</p>'
+    +'<label>邮箱<input id="r-mail" type="email" autocomplete="email"></label>'
+    +'<div class="row" style="margin-top:8px;align-items:flex-end">'
+    +'<label style="flex:1 1 120px">验证码<input id="r-code" inputmode="numeric" maxlength="6"></label>'
+    +'<button class="ghost" id="r-send" style="flex:0 0 auto">获取验证码</button></div>'
+    +'<label style="margin-top:8px">新密码<input id="r-pass" type="password" placeholder="至少 8 位"></label>'
+    +'<div class="err" id="a-err" style="margin-top:8px"></div>'
+    +'<button class="primary" style="width:100%;margin-top:10px" id="r-go">重置并登录</button>'
+    +'<p class="sub" style="margin-top:12px"><button class="link" id="r-back">返回登录</button></p>';
+  sendCodeButton('r-send','r-mail','reset');
+  document.getElementById('r-back').onclick=function(){renderAuth(false);};
+  document.getElementById('r-go').onclick=async function(){
+    var j=await api('/api/auth/reset',{
+      email:document.getElementById('r-mail').value.trim(),
+      code:document.getElementById('r-code').value.trim(),
+      new_password:document.getElementById('r-pass').value});
+    if(!j.ok){document.getElementById('a-err').textContent=j.error||'重置失败';return;}
+    document.getElementById('a-err').textContent='';
+    alert('密码已重置，请用新密码登录');
+    renderAuth(false);
+  };
 }
 document.getElementById('logout').onclick=async function(){
   await api('/api/auth/logout',{});renderAuth(false);
@@ -1855,11 +1921,35 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._send_json(503, {"ok": False, "error": "用户系统未启用"})
             return
         try:
+            if path == "/api/auth/email/code":
+                self._auth_email_code()
+                return
+            if path == "/api/auth/reset":
+                self._auth_reset()
+                return
             if path == "/api/auth/register":
                 body = self._read_json() or {}
+                cfg = mailer_module.load_config(paths.mail_path())
+                email = mailer_module.clean_email(body.get("email"))
+                if cfg.ready:
+                    # 开了邮件服务就强制验证：否则「验证码」只是摆设
+                    if not email:
+                        self._send_json(400, {"ok": False, "error": "请填写邮箱并获取验证码"})
+                        return
+                    ok, reason = mailer_module.CodeStore(paths.verify_codes_path()).verify(
+                        email, "register", str(body.get("code") or "")
+                    )
+                    if not ok:
+                        self._send_json(400, {"ok": False, "error": reason})
+                        return
                 user = self.users.register(
                     str(body.get("username") or ""), str(body.get("password") or "")
                 )
+                if email:
+                    try:
+                        self.users.mutate(lambda pool: pool.set_email(user.user_id, email))
+                    except Exception:
+                        pass
                 audit_module.record(
                     "panel.register",
                     path=paths.audit_path(),
@@ -3309,6 +3399,83 @@ class RelayHandler(BaseHTTPRequestHandler):
             "models": models,
             "entries": entries[-300:],
         })
+
+    # ---- 邮箱验证码（注册 / 重置密码） ----
+
+    def _auth_email_code(self) -> None:
+        """发验证码。**不透露邮箱是否已注册**——否则这里是账号枚举接口。"""
+        body = self._read_json() or {}
+        cfg = mailer_module.load_config(paths.mail_path())
+        if not cfg.ready:
+            self._send_json(503, {"ok": False,
+                                  "error": "本站未开启邮件服务，请联系站长开通或改用邀请/兑换方式注册"})
+            return
+        email = mailer_module.clean_email(body.get("email"))
+        purpose = str(body.get("purpose") or "register")
+        if not email:
+            self._send_json(400, {"ok": False, "error": "邮箱格式不正确"})
+            return
+        if purpose not in mailer_module.PURPOSES:
+            self._send_json(400, {"ok": False, "error": "用途只能是 register / reset"})
+            return
+        store = mailer_module.CodeStore(paths.verify_codes_path())
+        try:
+            code = store.issue(email, purpose)
+        except mailer_module.MailError as exc:
+            self._send_json(429, {"ok": False, "error": str(exc)})
+            return
+        try:
+            mailer_module.send_code(cfg, email, code, purpose)
+        except mailer_module.MailError as exc:
+            # 发不出去就把码作废，避免"用户没收到但码已存在"的困惑
+            store.verify(email, purpose, code)
+            self._send_json(502, {"ok": False, "error": str(exc)})
+            return
+        audit_module.record("panel.email_code", path=paths.audit_path(),
+                            purpose=purpose, ip=self.client_address[0])
+        self._send_json(200, {"ok": True, "expires_in": mailer_module.CODE_TTL})
+
+    def _auth_reset(self) -> None:
+        """邮箱验证码重置密码。成功后踢掉该用户所有会话。"""
+        body = self._read_json() or {}
+        cfg = mailer_module.load_config(paths.mail_path())
+        if not cfg.ready:
+            self._send_json(503, {"ok": False, "error": "本站未开启邮件服务，请联系站长重置密码"})
+            return
+        email = mailer_module.clean_email(body.get("email"))
+        code = str(body.get("code") or "")
+        new_password = str(body.get("new_password") or "")
+        if len(new_password) < 8:
+            self._send_json(400, {"ok": False, "error": "新密码至少 8 位"})
+            return
+        ok, reason = mailer_module.CodeStore(paths.verify_codes_path()).verify(email, "reset", code)
+        if not ok:
+            self._send_json(400, {"ok": False, "error": reason})
+            return
+        target = None
+        if self.users is not None:
+            for u in self.users.pool.users:
+                if u.email and u.email.lower() == email:
+                    target = u
+                    break
+        if target is None:
+            # 码对但没这个邮箱：同样回成功，不泄露「这个邮箱有没有注册」
+            self._send_json(200, {"ok": True})
+            return
+
+        def change(pool: Any) -> None:
+            pool.set_password(target.user_id, new_password)
+
+        try:
+            self.users.mutate(change)
+        except Exception as exc:
+            self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+        dropped = self._drop_other_sessions(target.user_id)
+        audit_module.record("panel.reset", path=paths.audit_path(),
+                            username=target.username, revoked_sessions=dropped,
+                            ip=self.client_address[0])
+        self._send_json(200, {"ok": True})
 
     def _user_email(self, user: Any) -> None:
         """绑定邮箱：要密码确认（否则拿到 cookie 就能把找回渠道改成自己的）。"""

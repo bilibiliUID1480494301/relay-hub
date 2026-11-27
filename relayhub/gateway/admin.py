@@ -39,6 +39,7 @@ from .. import __version__ as _version
 from . import migrate as migrate_module
 from . import users as user_module
 from . import timerules as timerules_module
+from . import mailer as mailer_module
 from . import wallpaper as wallpaper_module
 from . import tokens as token_module
 from . import persist as persist_module
@@ -703,6 +704,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             "/api/toip": self._toip_state,
             "/api/toip/otpauth": self._toip_otpauth,
             "/api/webui": self._webui_state,
+            "/api/mail": self._mail_state,
             "/api/policy": lambda: self.server.policy.state(),
             "/api/features": lambda: features_module.load(paths.features_path()),
             "/api/providers": providers_module.catalog,
@@ -881,6 +883,19 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             self._update_settings()
             return
+        if parts[:2] == ["api", "mail"]:
+            if method != "POST":
+                self._error(405, "邮件设置：GET 查看 / POST 保存")
+                return
+            if parts == ["api", "mail"]:
+                self._update_mail()
+                return
+            if parts == ["api", "mail", "test"]:
+                self._test_mail()
+                return
+            self._error(404, "未知邮件接口")
+            return
+
         if parts == ["api", "webui"]:
             if method != "POST":
                 self._error(405, "外观只支持 POST 保存")
@@ -2312,6 +2327,61 @@ class AdminHandler(BaseHTTPRequestHandler):
             )
         return payload
 
+    # ---- 邮件（SMTP）----
+
+    def _mail_state(self) -> None:
+        cfg = mailer_module.load_config(paths.mail_path())
+        self._send_json(200, cfg.public())
+
+    def _update_mail(self) -> None:
+        body = self._read_json()
+        if body is None:
+            return
+        old = mailer_module.load_config(paths.mail_path())
+        cfg = mailer_module.MailConfig(
+            enabled=bool(body.get("enabled", old.enabled)),
+            host=str(body.get("host") or "").strip(),
+            port=int(body.get("port") or 465),
+            user=str(body.get("user") or "").strip(),
+            # 空 = 不改密码（界面上永远不回显，避免误清空）
+            password=str(body.get("password") or "") or old.password,
+            sender=str(body.get("sender") or "").strip(),
+            tls=str(body.get("tls") or "ssl").lower(),
+        )
+        if cfg.port < 1 or cfg.port > 65535:
+            self._error(400, "端口不合法")
+            return
+        if cfg.tls not in ("ssl", "starttls", "none"):
+            self._error(400, "加密方式只能是 ssl / starttls / none")
+            return
+        if cfg.enabled and not cfg.ready:
+            self._error(400, "启用邮件需要填服务器、发件地址，并选择加密方式")
+            return
+        mailer_module.save_config(paths.mail_path(), cfg)
+        audit_module.record("mail.save", path=self.server.audit_path, enabled=cfg.enabled,
+                            host=cfg.host, sender=cfg.sender)
+        self._send_json(200, cfg.public())
+
+    def _test_mail(self) -> None:
+        body = self._read_json()
+        if body is None:
+            return
+        to = mailer_module.clean_email(body.get("to"))
+        if not to:
+            self._error(400, "收件地址格式不正确")
+            return
+        cfg = mailer_module.load_config(paths.mail_path())
+        try:
+            mailer_module.send_code(cfg, to, "123456", "test")
+        except mailer_module.MailNotConfigured as exc:
+            self._error(503, str(exc))
+            return
+        except mailer_module.MailError as exc:
+            self._error(502, str(exc))
+            return
+        audit_module.record("mail.test", path=self.server.audit_path, to=to)
+        self._send_json(200, {"ok": True, "to": to})
+
     def _webui_state(self) -> dict[str, Any]:
         """外观配置回读：文件不存在/损坏一律回空表（前端显示默认值）。"""
         try:
@@ -2877,6 +2947,33 @@ tbody tr:hover td{ background:var(--accent-soft); }
 </nav>
 
 <div class="pane" id="pane-server" style="display:none">
+<section class="panel">
+  <h2>邮件服务（SMTP）</h2>
+  <p class="hint">用于注册验证码与密码找回。未配置时注册仍走「不限/兑换码」流程，
+  面板会明确提示「本站未开启邮件服务」，不会假装已发送。</p>
+  <div class="row">
+    <label style="flex:0 0 auto"><input type="checkbox" id="ml-enabled" style="height:auto"> 启用邮件服务</label>
+    <label>服务器 <input id="ml-host" placeholder="smtp.example.com"></label>
+    <label style="flex:0 0 110px">端口 <input id="ml-port" type="number" value="465"></label>
+    <label>加密 <select id="ml-tls">
+      <option value="ssl">SSL（465）</option>
+      <option value="starttls">STARTTLS（587）</option>
+      <option value="none">不加密（不推荐）</option>
+    </select></label>
+  </div>
+  <div class="row">
+    <label>账号 <input id="ml-user" placeholder="登录名（可空）"></label>
+    <label>密码/授权码 <input id="ml-pass" type="password" placeholder="留空 = 不修改"></label>
+    <label>发件地址 <input id="ml-from" placeholder="no-reply@example.com"></label>
+  </div>
+  <div class="row">
+    <button id="ml-save">保存</button>
+    <button class="ghost" id="ml-load">读取当前</button>
+    <label>测试收件地址 <input id="ml-test-to" placeholder="you@example.com"></label>
+    <button class="ghost" id="ml-test">发送测试信</button>
+  </div>
+  <p class="hint" id="ml-msg"></p>
+</section>
 <section class="panel">
   <h2>服务器状态</h2>
   <p class="hint">进程与机器概况。内存细节需要服务端装 psutil，没有则显示「不可用」而不是 0。</p>
@@ -3577,7 +3674,7 @@ function loadPane(name){
   if(name==='theme'){loadTheme();return;}
   if(name==='audit'){loadAudit();return;}
   if(name==='models'){if(!MD_LOADED){loadModels();}else{renderModels();}return;}
-  if(name==='server'){loadServer();return;}
+  if(name==='server'){loadServer();loadMail();return;}
 }
 
 
@@ -4289,6 +4386,46 @@ function themeModeToggle(){
   document.getElementById('th-rotate-box').style.display=(m==='rotate')?'flex':'none';
   document.getElementById('th-api-box').style.display=(m==='api')?'flex':'none';
 }
+function loadMail(){
+  api('GET','/api/mail').then(function(s){
+    document.getElementById('ml-enabled').checked=!!s.enabled;
+    document.getElementById('ml-host').value=s.host||'';
+    document.getElementById('ml-port').value=s.port||465;
+    document.getElementById('ml-tls').value=s.tls||'ssl';
+    document.getElementById('ml-user').value=s.user||'';
+    document.getElementById('ml-from').value=s.sender||'';
+    document.getElementById('ml-pass').value='';
+    document.getElementById('ml-pass').placeholder=s.has_password?'已设置，留空不改':'留空 = 不修改';
+    document.getElementById('ml-msg').textContent=s.enabled?'当前已启用':'当前未启用';
+  }).catch(function(e){toast('读取失败：'+e.message,false);});
+}
+document.getElementById('ml-load').onclick=loadMail;
+document.getElementById('ml-save').onclick=function(){
+  var body={enabled:document.getElementById('ml-enabled').checked,
+            host:document.getElementById('ml-host').value.trim(),
+            port:parseInt(document.getElementById('ml-port').value,10)||465,
+            tls:document.getElementById('ml-tls').value,
+            user:document.getElementById('ml-user').value.trim(),
+            password:document.getElementById('ml-pass').value,
+            sender:document.getElementById('ml-from').value.trim()};
+  api('POST','/api/mail',body).then(function(s){
+    document.getElementById('ml-msg').textContent='已保存'+(s.enabled?'，邮件服务已启用':'');
+    document.getElementById('ml-pass').value='';
+    toast('邮件设置已保存',true);
+  }).catch(function(e){document.getElementById('ml-msg').textContent='';toast('保存失败：'+e.message,false);});
+};
+document.getElementById('ml-test').onclick=function(){
+  var to=document.getElementById('ml-test-to').value.trim();
+  if(!to){alert('请填收件地址');return;}
+  document.getElementById('ml-msg').textContent='发送中…';
+  api('POST','/api/mail/test',{to:to}).then(function(){
+    document.getElementById('ml-msg').textContent='测试信已发出，请查收（含垃圾箱）';
+    toast('已发送',true);
+  }).catch(function(e){
+    document.getElementById('ml-msg').textContent='发送失败：'+e.message;
+    toast('发送失败：'+e.message,false);
+  });
+};
 function loadTheme(){
   api('GET','/api/webui').then(function(s){
     document.getElementById('th-color').value=s.bg_color||'';
