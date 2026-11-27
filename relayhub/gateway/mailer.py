@@ -66,6 +66,9 @@ class MailConfig:
     sender: str = ""
     tls: str = "ssl"          # ssl | starttls | none
     site_name: str = "relay-hub"
+    # 注册允许的邮箱域名；空 = 不限。只约束**注册**，不约束找回密码——
+    # 域名后来被移除的人也要能登回去。
+    allowed_domains: tuple[str, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -77,7 +80,47 @@ class MailConfig:
             "enabled": self.enabled, "host": self.host, "port": self.port,
             "user": self.user, "sender": self.sender, "tls": self.tls,
             "has_password": bool(self.password),
+            "allowed_domains": list(self.allowed_domains),
         }
+
+
+_DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+
+
+def clean_domains(values: object) -> tuple[str, ...]:
+    """域名白名单：去协议/空格/@，小写，最多 50 条；非法条目直接丢弃。"""
+    NL = chr(10)
+    if isinstance(values, str):
+        values = values.replace(",", NL).split(NL)
+    if not isinstance(values, (list, tuple)):
+        return ()
+    out: list[str] = []
+    for raw in values:
+        item = str(raw or "").strip().lower()
+        item = item.split("@")[-1].strip(".").strip()
+        if item.startswith("*."):
+            item = item[2:]
+        if not item or len(item) > 190 or not _DOMAIN_RE.match(item):
+            continue
+        if item not in out:
+            out.append(item)
+        if len(out) >= 50:
+            break
+    return tuple(out)
+
+
+def domain_allowed(email: str, domains: tuple[str, ...]) -> bool:
+    """白名单为空放行；否则要求精确匹配或子域匹配（example.com 覆盖 a.example.com）。"""
+    if not domains:
+        return True
+    addr = str(email or "").strip().lower()
+    if "@" not in addr:
+        return False
+    host = addr.rsplit("@", 1)[1]
+    for d in domains:
+        if host == d or host.endswith("." + d):
+            return True
+    return False
 
 
 def load_config(path: Path) -> MailConfig:
@@ -101,6 +144,7 @@ def load_config(path: Path) -> MailConfig:
         sender=str(raw.get("sender") or "").strip(),
         tls=tls,
         site_name=str(raw.get("site_name") or "relay-hub"),
+        allowed_domains=clean_domains(raw.get("allowed_domains") or []),
     )
 
 
@@ -109,6 +153,7 @@ def save_config(path: Path, cfg: MailConfig) -> None:
         "enabled": cfg.enabled, "host": cfg.host, "port": cfg.port,
         "user": cfg.user, "password": cfg.password, "sender": cfg.sender,
         "tls": cfg.tls, "site_name": cfg.site_name,
+        "allowed_domains": list(cfg.allowed_domains),
     })
 
 

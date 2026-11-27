@@ -187,3 +187,42 @@ def test_reset_with_email_code(mail_relay) -> None:
     assert status == 401
     status, _ = _post(base, "/api/auth/login", {"username": "olga", "password": "brandnew99"})
     assert status == 200
+
+
+def test_domain_whitelist_gates_registration_not_reset(mail_relay) -> None:
+    """白名单只拦注册；找回密码不受限（域名被移除的人也要能登回去）。"""
+    server, home, sent = mail_relay
+    _enable_mail(home)
+    cfg_path = home / "mail.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg["allowed_domains"] = ["school.edu.cn"]
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    base = server.base_url
+    # 不在白名单 → 拒，且不真发信
+    status, body = _post(base, "/api/auth/email/code",
+                         {"email": "x@qq.com", "purpose": "register"})
+    assert status == 400 and "仅允许" in body["error"]
+    assert not sent
+
+    # 子域放行
+    status, body = _post(base, "/api/auth/email/code",
+                         {"email": "a@cs.school.edu.cn", "purpose": "register"})
+    assert status == 200, body
+    code = sent[-1][1]
+
+    # 绕过发码直接提交也被拦
+    status, body = _post(base, "/api/auth/register",
+                         {"username": "peter", "password": "password8",
+                          "email": "p@qq.com", "code": code})
+    assert status == 400 and "域名" in body["error"]
+
+    status, body = _post(base, "/api/auth/register",
+                         {"username": "peter", "password": "password8",
+                          "email": "a@cs.school.edu.cn", "code": code})
+    assert status == 200 and body["ok"], body
+
+    # 重置用途即使域名不在名单里也允许发码（账号可能早先就有）
+    status, body = _post(base, "/api/auth/email/code",
+                         {"email": "old@qq.com", "purpose": "reset"})
+    assert status == 200, body

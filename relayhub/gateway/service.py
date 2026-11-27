@@ -1936,6 +1936,10 @@ class RelayHandler(BaseHTTPRequestHandler):
                     if not email:
                         self._send_json(400, {"ok": False, "error": "请填写邮箱并获取验证码"})
                         return
+                    if not mailer_module.domain_allowed(email, cfg.allowed_domains):
+                        self._send_json(400, {"ok": False,
+                                              "error": "本站仅允许指定域名邮箱注册"})
+                        return
                     ok, reason = mailer_module.CodeStore(paths.verify_codes_path()).verify(
                         email, "register", str(body.get("code") or "")
                     )
@@ -3417,6 +3421,12 @@ class RelayHandler(BaseHTTPRequestHandler):
             return
         if purpose not in mailer_module.PURPOSES:
             self._send_json(400, {"ok": False, "error": "用途只能是 register / reset"})
+            return
+        # 域名白名单只约束注册：找回密码不受限，否则域名被移除的人会被锁死在门外
+        if purpose == "register" and not mailer_module.domain_allowed(email, cfg.allowed_domains):
+            self._send_json(400, {"ok": False,
+                                  "error": "本站仅允许指定域名邮箱注册：" +
+                                           "、".join(cfg.allowed_domains)})
             return
         store = mailer_module.CodeStore(paths.verify_codes_path())
         try:

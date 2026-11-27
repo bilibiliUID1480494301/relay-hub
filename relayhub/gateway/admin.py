@@ -2347,6 +2347,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             password=str(body.get("password") or "") or old.password,
             sender=str(body.get("sender") or "").strip(),
             tls=str(body.get("tls") or "ssl").lower(),
+            allowed_domains=mailer_module.clean_domains(body.get("allowed_domains") or []),
         )
         if cfg.port < 1 or cfg.port > 65535:
             self._error(400, "端口不合法")
@@ -2965,6 +2966,11 @@ tbody tr:hover td{ background:var(--accent-soft); }
     <label>账号 <input id="ml-user" placeholder="登录名（可空）"></label>
     <label>密码/授权码 <input id="ml-pass" type="password" placeholder="留空 = 不修改"></label>
     <label>发件地址 <input id="ml-from" placeholder="no-reply@example.com"></label>
+  </div>
+  <div class="row" style="flex-direction:column;align-items:stretch">
+    <label>允许注册的邮箱域名（一行一个，留空 = 不限；example.com 同时覆盖 a.example.com）
+      <textarea id="ml-domains" rows="3" placeholder="qq.com&#10;163.com&#10;school.edu.cn"></textarea>
+    </label>
   </div>
   <div class="row">
     <button id="ml-save">保存</button>
@@ -4396,6 +4402,7 @@ function loadMail(){
     document.getElementById('ml-from').value=s.sender||'';
     document.getElementById('ml-pass').value='';
     document.getElementById('ml-pass').placeholder=s.has_password?'已设置，留空不改':'留空 = 不修改';
+    document.getElementById('ml-domains').value=(s.allowed_domains||[]).join(NL);
     document.getElementById('ml-msg').textContent=s.enabled?'当前已启用':'当前未启用';
   }).catch(function(e){toast('读取失败：'+e.message,false);});
 }
@@ -4407,7 +4414,8 @@ document.getElementById('ml-save').onclick=function(){
             tls:document.getElementById('ml-tls').value,
             user:document.getElementById('ml-user').value.trim(),
             password:document.getElementById('ml-pass').value,
-            sender:document.getElementById('ml-from').value.trim()};
+            sender:document.getElementById('ml-from').value.trim(),
+            allowed_domains:(document.getElementById('ml-domains').value||'').split(NL)};
   api('POST','/api/mail',body).then(function(s){
     document.getElementById('ml-msg').textContent='已保存'+(s.enabled?'，邮件服务已启用':'');
     document.getElementById('ml-pass').value='';
