@@ -141,3 +141,43 @@ def test_wallpaper_opacity_clamped_and_emits_fade_layer() -> None:
     # 不透明度 1 时不加淡出层（少一层合成）
     full = wallpaper.body_css({"bg_image": "https://example.com/a.jpg", "bg_opacity": 1})
     assert "body::after" not in full
+
+
+def test_wallpaper_modes_roundtrip_and_validation(tmp_path: Path) -> None:
+    """轮换/API 模式：正常保存能回读；缺素材或地址非法要 400。"""
+    with managed_home(tmp_path) as home:
+        with admin_console(home) as base:
+            # 轮换至少两张
+            status, payload = post(base, "/api/webui", {
+                "bg_mode": "rotate",
+                "bg_images": ["https://a.example/1.jpg"],
+                "bg_rotate_seconds": 30,
+            })
+            assert status == 400, payload
+
+            # 正常轮换
+            status, payload = post(base, "/api/webui", {
+                "bg_mode": "rotate",
+                "bg_images": ["https://a.example/1.jpg", "https://a.example/2.jpg"],
+                "bg_rotate_seconds": 30,
+                "bg_opacity": 0.7,
+            })
+            assert status == 200, payload
+            state = payload
+            assert state["bg_mode"] == "rotate"
+            assert len(state["bg_images"]) == 2
+            assert state["bg_rotate_seconds"] == 30
+            assert state["bg_opacity"] == 0.7
+
+            # API 模式：必须是 https
+            status, payload = post(base, "/api/webui", {
+                "bg_mode": "api", "bg_api_url": "http://a.example/pick",
+            })
+            assert status == 400, payload
+
+            status, payload = post(base, "/api/webui", {
+                "bg_mode": "api", "bg_api_url": "https://a.example/pick",
+            })
+            assert status == 200, payload
+            assert payload["bg_mode"] == "api"
+            assert payload["bg_api_url"] == "https://a.example/pick"

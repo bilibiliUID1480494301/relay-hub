@@ -370,6 +370,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                 "padding:18px 20px;box-shadow:0 8px 30px rgba(38,33,92,.10)}</style></head>",
                 1,
             )
+            # 轮换 / API 模式：管理面也跟同一份配置走，否则「设了轮换却只有面板在变」
+            spin = wallpaper_module.rotate_script(cfg)
+            if spin:
+                html = html.replace("</body>", spin + "</body>", 1)
         raw = html.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -3223,7 +3227,30 @@ tbody tr:hover td{ background:var(--accent-soft); }
     <input id="th-color" placeholder="背景色，如 #1B2A4A（留空=默认）" style="flex:1">
   </div>
   <div class="row">
+    <label>模式 <select id="th-mode">
+      <option value="static">固定一张</option>
+      <option value="rotate">多图轮换</option>
+      <option value="api">从接口拉取</option>
+    </select></label>
+    <label>填充 <select id="th-fit">
+      <option value="cover">cover（铺满裁切）</option>
+      <option value="contain">contain（完整显示）</option>
+    </select></label>
+  </div>
+  <div class="row" id="th-static-box">
     <input id="th-image" placeholder="背景图 URL，如 https://example.com/bg.jpg（留空=无）" style="flex:1">
+  </div>
+  <div class="row" id="th-rotate-box" style="display:none;flex-direction:column;align-items:stretch">
+    <label style="flex:1 1 auto">轮换壁纸，一行一个（2~12 张）
+      <textarea id="th-images" rows="4" placeholder="https://a.example/1.jpg&#10;https://a.example/2.jpg"></textarea>
+    </label>
+    <label style="max-width:160px">间隔秒数（10~3600）
+      <input id="th-seconds" type="number" min="10" max="3600" step="5" value="60" style="width:110px">
+    </label>
+  </div>
+  <div class="row" id="th-api-box" style="display:none">
+    <input id="th-api" placeholder="壁纸接口 https 地址（返回图片 URL 或 JSON）" style="flex:1">
+    <label style="flex:0 0 auto"><input type="checkbox" id="th-api-http" style="height:auto"> 允许 http</label>
   </div>
   <div class="row">
     <label style="flex:0 0 260px">背景透明度 <input id="th-opacity" type="range" min="0.05" max="1" step="0.05" value="1" style="height:auto"></label>
@@ -3253,6 +3280,7 @@ tbody tr:hover td{ background:var(--accent-soft); }
 </div>
 <script>
 var state=null,editing=null,toastTimer=null;
+var NL=String.fromCharCode(10);
 var token=new URLSearchParams(location.search).get('token')||'';
 
 function api(method,path,body){
@@ -4228,22 +4256,43 @@ function loadToipQr(){
 document.getElementById('tp-load').onclick=loadToip;
 document.getElementById('tp-qr-show').onclick=loadToipQr;
 
+function themeModeToggle(){
+  var m=document.getElementById('th-mode').value;
+  document.getElementById('th-static-box').style.display=(m==='static')?'flex':'none';
+  document.getElementById('th-rotate-box').style.display=(m==='rotate')?'flex':'none';
+  document.getElementById('th-api-box').style.display=(m==='api')?'flex':'none';
+}
 function loadTheme(){
   api('GET','/api/webui').then(function(s){
     document.getElementById('th-color').value=s.bg_color||'';
     document.getElementById('th-image').value=s.bg_image||'';
+    document.getElementById('th-mode').value=s.bg_mode||'static';
+    document.getElementById('th-fit').value=s.bg_fit||'cover';
+    document.getElementById('th-images').value=(s.bg_images||[]).join(NL);
+    document.getElementById('th-seconds').value=s.bg_rotate_seconds||60;
+    document.getElementById('th-api').value=s.bg_api_url||'';
+    document.getElementById('th-api-http').checked=!!s.bg_api_allow_http;
     var op=(s.bg_opacity!=null?s.bg_opacity:1);
     document.getElementById('th-opacity').value=op;
     document.getElementById('th-opacity-val').textContent=Math.round(op*100)+'%';
+    themeModeToggle();
   }).catch(function(e){toast('读取失败：'+e.message,false);});
 }
+document.getElementById('th-mode').onchange=themeModeToggle;
 document.getElementById('th-opacity').oninput=function(){
   document.getElementById('th-opacity-val').textContent=Math.round(this.value*100)+'%';};
 document.getElementById('th-load').onclick=loadTheme;
 document.getElementById('th-save').onclick=function(){
+  var images=(document.getElementById('th-images').value||'').split(NL).map(function(x){return x.trim();}).filter(function(x){return x;});
   var body={bg_color:document.getElementById('th-color').value.trim(),
             bg_image:document.getElementById('th-image').value.trim(),
-            bg_opacity:parseFloat(document.getElementById('th-opacity').value)};
+            bg_opacity:parseFloat(document.getElementById('th-opacity').value),
+            bg_mode:document.getElementById('th-mode').value,
+            bg_fit:document.getElementById('th-fit').value,
+            bg_images:images,
+            bg_rotate_seconds:parseInt(document.getElementById('th-seconds').value,10)||60,
+            bg_api_url:document.getElementById('th-api').value.trim(),
+            bg_api_allow_http:document.getElementById('th-api-http').checked};
   api('POST','/api/webui',body).then(function(s){
     document.getElementById('th-msg').textContent='已保存，刷新 /panel 即可看到新背景。';
     toast('外观已保存',true);
