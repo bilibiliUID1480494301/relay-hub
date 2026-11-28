@@ -27,7 +27,11 @@ PROTOCOL_ANTHROPIC = "anthropic-messages"
 PROTOCOL_OPENAI_CHAT = "openai-chat"
 # 公开 Gemini API（API Key）：v1beta generateContent / streamGenerateContent
 PROTOCOL_GEMINI_API = "gemini-api"
-SUPPORTED_PROTOCOLS = (PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI_CHAT, PROTOCOL_GEMINI_API)
+# 站间直通：不翻译，按下游路径原样转发给配对站点。
+# 与其它协议的区别只在「发什么」：别的协议发翻译后的 IR，这个发原始字节。
+PROTOCOL_PASSTHROUGH = "relayhub-passthrough"
+SUPPORTED_PROTOCOLS = (PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI_CHAT,
+                       PROTOCOL_GEMINI_API, PROTOCOL_PASSTHROUGH)
 
 # 鉴权头模式：auto=按协议默认（anthropic→x-api-key，openai→Bearer）；
 # bearer=强制 Authorization: Bearer（部分上游要求 Bearer 而不是 x-api-key）。

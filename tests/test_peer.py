@@ -207,3 +207,46 @@ def test_forward_accepts_gemini_path_without_fixed_mapping(forward_relay) -> Non
            "X-Peer-Path": "/v1beta/models/x:deleteModel"}
     status, raw, _ = _post(base, "/v1/_peer/forward", body, bad)
     assert status == 400, raw[:160]
+
+
+def test_entry_side_passthrough_reaches_paired_station(tmp_path: Path) -> None:
+    """入口站配一条直通渠道 → 请求原样到对端 → 响应原样回来，全程不翻译。"""
+    import relayhub.paths as paths
+    from relayhub.gateway.pool import PROTOCOL_PASSTHROUGH, KeyPool, UpstreamKey
+    from relayhub.gateway.router import KeyPoolRouter
+    from tests.support import gateway_for
+
+    originals = {name: getattr(paths, name) for name in ("users_path", "peer_path")}
+    paths.users_path = lambda: tmp_path / "users.json"
+    paths.peer_path = lambda: tmp_path / "peers.json"
+    UserStore(tmp_path / "users.json")
+
+    token = peer.new_token()
+    peer.PeerStore(tmp_path / "peers.json").upsert(
+        peer.Peer(peer_id="lab", url="", token=token)
+    )
+
+    # 出口站：有主凭证（直通要 loopback 调自己的公开接口）
+    exit_server = RelayServer(("127.0.0.1", 0), demo_router(), api_key="master-key",
+                              event_delay=0.0, tokens=TokenStore(tmp_path / "t2.json"))
+    exit_thread = threading.Thread(target=exit_server.serve_forever, daemon=True)
+    exit_thread.start()
+
+    entry_key = UpstreamKey(
+        key_id="p1", label="lab-direct", base_url=exit_server.base_url,
+        api_key=token, protocol=PROTOCOL_PASSTHROUGH, models=("deepseek-v4-flash",),
+    )
+    try:
+        with gateway_for(KeyPoolRouter(KeyPool([entry_key]))) as entry_base:
+            body = json.dumps({"model": "deepseek-v4-flash",
+                               "messages": [{"role": "user", "content": "hi"}]}).encode()
+            status, raw, _headers = _post(entry_base, "/v1/chat/completions", body,
+                                          {"Content-Type": "application/json"})
+            assert status == 200, raw[:300]
+            assert b"choices" in raw or b"content" in raw
+    finally:
+        exit_server.shutdown()
+        exit_server.server_close()
+        exit_thread.join(timeout=5)
+        for name, value in originals.items():
+            setattr(paths, name, value)

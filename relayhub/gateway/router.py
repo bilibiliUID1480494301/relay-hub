@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import time
+
 import hashlib
 import os
 import json
@@ -30,7 +32,7 @@ from typing import Any, Iterator
 
 from . import upstream
 from .pool import KeyPool, UpstreamKey
-from .pool import PROTOCOL_ANTHROPIC
+from .pool import PROTOCOL_ANTHROPIC, PROTOCOL_PASSTHROUGH
 from .upstream import UpstreamError, call_embeddings
 
 
@@ -354,6 +356,22 @@ class KeyPoolRouter:
         raise all_failed(attempts, last)
 
     # -- 内部 ------------------------------------------------------------
+
+    def passthrough_key(self, model: str) -> UpstreamKey | None:
+        """该模型是否有可用的直通渠道（站间同行）。
+
+        只做「有没有」的判定，不参与普通选路：直通要在翻译之前决定，
+        那时候还没有 IR，不能走 candidates()/relay()。
+        """
+        for key in self.pool.keys:
+            if getattr(key, "protocol", "") != PROTOCOL_PASSTHROUGH:
+                continue
+            if not key.enabled or key.cooling_down_for(time.time()) > 0:
+                continue
+            if key.models and model not in key.models:
+                continue
+            return key
+        return None
 
     def _relay_once(
         self,

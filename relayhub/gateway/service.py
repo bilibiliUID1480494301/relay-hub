@@ -103,6 +103,10 @@ class ChannelPool:
         self.channels = channels
         self._cursor = 0
 
+    def passthrough_key(self, model: str) -> None:
+        """演示路由没有站间直通。"""
+        return None
+
     def candidates(self) -> Iterator[Channel]:
         total = len(self.channels)
         start = self._cursor
@@ -2362,6 +2366,71 @@ class RelayHandler(BaseHTTPRequestHandler):
     )
     _PEER_FORWARD_MAX_BODY = 2 * 1024 * 1024
 
+    def _peer_relay(self, key: Any, path: str, streaming: bool, dialect: str,
+                    identity: Any, started: float, model: str) -> None:
+        """把请求原样转发给配对站点，响应字节原样回给客户端。
+
+        与普通转发（把对端当上游）的区别只在「不翻译」：
+        请求体是客户端原始字节，响应也是对端公开接口的原始字节。
+
+        代价（写出来，别假装没有）：
+          * 拿不到 usage 的精细拆分，只能按"一次请求"记账；
+          * 对端如果改了响应格式，本站无法兜底；
+          * 因此只适合方言一致、双方互信的链路。
+        """
+        import http.client
+        from urllib.parse import urlsplit
+
+        raw_body = getattr(self, "_last_raw_body", b"")
+        parts = urlsplit(key.base_url)
+        conn_cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+        conn = conn_cls(parts.hostname or "127.0.0.1", parts.port or (443 if parts.scheme == "https" else 80),
+                        timeout=300)
+        target = (parts.path.rstrip("/") if parts.path else "") + "/v1/_peer/forward"
+        try:
+            conn.request("POST", target, body=raw_body, headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {key.api_key}",
+                "X-Peer-Path": path,
+                "Accept": self.headers.get("Accept") or ("text/event-stream" if streaming else "application/json"),
+            })
+            resp = conn.getresponse()
+            if resp.status != 200:
+                detail = resp.read()[:400].decode("utf-8", "replace")
+                self._error(resp.status, f"直通上游返回 {resp.status}：{detail}", "api_error", dialect)
+                self._log_request(started=started, dialect=dialect, identity=identity,
+                                  ok=False, status=resp.status, reason="peer passthrough failed",
+                                  model=model)
+                return
+            if streaming:
+                self._begin_sse()
+                while True:
+                    chunk = resp.read(4096)
+                    if not chunk:
+                        break
+                    self._write_chunk(chunk)
+                self._end_chunks()
+            else:
+                payload = resp.read()
+                self.send_response(200)
+                self._echo_request_id()
+                self.send_header("Content-Type", resp.getheader("Content-Type") or "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            self._record(identity, True)
+            self._log_request(started=started, dialect=dialect, identity=identity,
+                              ok=True, status=200, reason="peer passthrough", model=model)
+            audit_module.record("peer.relay", path=paths.audit_path(),
+                                key=key.label, target=path, model=model,
+                                streaming=streaming, ip=self._client_ip())
+        except OSError as exc:
+            self._error(502, f"直通失败：{exc}", "api_error", dialect)
+            self._log_request(started=started, dialect=dialect, identity=identity,
+                              ok=False, status=502, reason=f"peer passthrough: {exc}", model=model)
+        finally:
+            conn.close()
+
     def _peer_forward(self) -> None:
         """站间字节直通：把本机当成对方的上游，原样转发、原样回传。
 
@@ -2849,6 +2918,8 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._error(400, "Content-Length 非法", dialect=dialect)
             return None
         raw = self._read_body_bytes(length)
+        # 直通要用原始字节：json 往返会重排键、丢未知字段，站间透传没必要受这个损失
+        self._last_raw_body = raw
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         if ctype == e2e_module.ENVELOPE_CONTENT_TYPE:
             return self._open_envelope(raw, dialect)
@@ -4109,6 +4180,13 @@ class RelayHandler(BaseHTTPRequestHandler):
         model = str(body.get("model") or "")
         # stream 要在协议翻译前取走：翻译后的 Anthropic 形态里没有这个字段。
         streaming = bool(body.get("stream"))
+        # 站间直通：只要该模型有可用的直通渠道，就整条链路不翻译。
+        # 判定必须在翻译之前——翻译之后就只剩 IR，原始字节已经没了。
+        _pick = getattr(self.router, "passthrough_key", None)
+        peer_key = _pick(model) if (model and _pick) else None
+        if peer_key is not None:
+            self._peer_relay(peer_key, path, streaming, dialect, identity, started, model)
+            return
         if gemini_path:
             # 入站 Gemini：模型在路径里，请求体转成内部 Anthropic 形态再走同一条链路
             model = gemini_path.group(1)
