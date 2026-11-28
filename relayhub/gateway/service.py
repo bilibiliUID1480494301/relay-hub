@@ -32,6 +32,7 @@ from . import drift as drift_module
 from .. import __version__ as relayhub_version
 from . import audit as audit_module
 from . import mailer as mailer_module
+from . import peer as peer_module
 from . import a2a as a2a_module
 from . import e2e as e2e_module
 from . import mcp as mcp_module
@@ -2350,6 +2351,160 @@ class RelayHandler(BaseHTTPRequestHandler):
                 supplied = auth[7:]
         return supplied.strip()
 
+    # 站间直通：允许的路径与体积上限（写死，不做通用代理）
+    _PEER_FORWARD_PATHS = {
+        "openai": "/v1/chat/completions",
+        "anthropic": "/v1/messages",
+        "openai-responses": "/v1/responses",
+    }
+    _PEER_FORWARD_MAX_BODY = 2 * 1024 * 1024
+
+    def _peer_forward(self) -> None:
+        """站间字节直通：把本机当成对方的上游，原样转发、原样回传。
+
+        设计取舍（重要）：
+
+        * **不做翻译**。进来的字节直接交给本站自己的公开接口（loopback），
+          返回的字节也原样还给对方。省掉的是「入口站 → 出口站」这一跳的
+          解析与重组；出口站到自己上游的翻译仍需按方言进行。
+        * **复用本站规则**。走 loopback 调用公开接口，意味着令牌、额度、
+          IP 白名单、RPM、模型限制全部照常生效——直通省的是 CPU，不是规则。
+        * **路径白名单**。只认三种对话接口，不做通用代理；body 上限 2MB。
+        """
+        import http.client
+
+        store = peer_module.PeerStore(paths.peer_path())
+        if not store.list():
+            self._error(404, f"未知路径 {self.path.split('?')[0]}", "not_found_error")
+            return
+        try:
+            peer = peer_module.identify(store, self.headers)
+        except peer_module.PeerError as exc:
+            self._error(401, str(exc), "authentication_error")
+            return
+
+        dialect = str(self.headers.get("X-Peer-Dialect") or "").strip().lower()
+        target = self._PEER_FORWARD_PATHS.get(dialect)
+        if not target:
+            self._error(400, f"不支持的直通方言 {dialect!r}", "invalid_request_error")
+            return
+        if not self.api_key:
+            # 没有主凭证就无法在 loopback 上通过本站鉴权；宁可明确拒绝，
+            # 也不要在直通路径上开一个"免鉴权后门"
+            self._error(503, "本站未配置主凭证（--api-key），不能作为直通出口", "api_error")
+            return
+
+        length = 0
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length > self._PEER_FORWARD_MAX_BODY:
+            self._error(413, "请求体过大", "invalid_request_error")
+            return
+        body = self.rfile.read(length) if length else b""
+
+        port = self.server.server_address[1]  # type: ignore[attr-defined]
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=300)
+        try:
+            conn.request("POST", target, body=body, headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "Accept": self.headers.get("Accept") or "application/json",
+                "X-Peer-Forwarded-By": peer.peer_id,
+            })
+            upstream = conn.getresponse()
+            payload = upstream.read()
+            self.send_response(upstream.status)
+            for header, value in upstream.getheaders():
+                if header.lower() in ("transfer-encoding", "connection", "content-length"):
+                    continue
+                self.send_header(header, value)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("X-Peer-Forwarded", peer.peer_id)
+            self.end_headers()
+            self.wfile.write(payload)
+            audit_module.record("peer.forward", path=paths.audit_path(),
+                                peer=peer.peer_id, dialect=dialect,
+                                status=upstream.status, bytes=len(payload))
+        except OSError as exc:
+            self._error(502, f"出口站转发失败：{exc}", "api_error")
+        finally:
+            conn.close()
+
+    def _handle_peer(self, path: str) -> None:
+        """站间私有协议：info / balance / pricing（只读）。
+
+        返回的数值一律标 advisory：那是上游自报的数字，上游随时可以改。
+        这里**不做请求签名**——两站之间已有 TLS，签名只能证明「是谁在问」，
+        而这件事一个 Bearer 令牌就够了。真要不可否认的凭证，等有第三方
+        对账需求时再加，不要预支复杂度。
+        """
+        store = peer_module.PeerStore(paths.peer_path())
+        if not store.list():
+            # 没配任何 peer 时，与「路径不存在」完全一致：不给探测者任何信号
+            self._error(404, f"未知路径 {self.path.split('?')[0]}", "not_found_error")
+            return
+        try:
+            peer = peer_module.identify(store, self.headers)
+        except peer_module.PeerError as exc:
+            self._error(401, str(exc), "authentication_error")
+            return
+
+        action = path.rsplit("/", 1)[-1]
+        base = {
+            "ok": True,
+            "advisory": True,
+            "source": "peer",
+            "peer_id": peer.peer_id,
+            "warning": peer_module.ADVISORY_WARNING,
+            "served_at": time.time(),
+        }
+        if action == "info":
+            base.update({
+                "station": {
+                    "name": self._site_name(),
+                    "version": relayhub_version,
+                },
+                "capabilities": list(peer_module.CAPABILITIES),
+                "models": len(self.router.models()),
+            })
+            self._send_json(200, base)
+            return
+        if action == "balance":
+            keys = list(getattr(getattr(self.router, "pool", None), "keys", []) or [])
+            known = [k for k in keys if int(getattr(k, "credits", -1)) >= 0]
+            base.update({
+                "currency": "CNY",
+                # -1 表示「不知道」，不要当 0 报出去：0 会被误读成"没钱了"
+                "remaining": sum(int(getattr(k, "credits", 0)) for k in known) if known else -1,
+                "unknown_keys": len(keys) - len(known),
+                "keys": len(keys),
+                "updated_at": max((float(getattr(k, "credits_updated_at", 0) or 0) for k in known), default=0.0),
+            })
+            self._send_json(200, base)
+            return
+        if action == "pricing":
+            pool = self.users.pool if self.users else None
+            mult = pool.time_multiplier() if pool else 1.0
+            models = []
+            if pool:
+                for model in sorted(self.router.models()):
+                    models.append({
+                        "model": model,
+                        "in_per_1m": round(pool.price_in_per_1k * 1000 * mult, 4),
+                        "out_per_1m": round(pool.price_out_per_1k * 1000 * mult, 4),
+                    })
+            base.update({
+                "currency": "CNY",
+                "unit": "per_1m_tokens",
+                "peak_now": mult > 1.0,
+                "models": models,
+            })
+            self._send_json(200, base)
+            return
+        self._error(404, f"未知的站间接口 {action}", "not_found_error")
+
     def _client_ip(self) -> str:
         """请求来源 IP（用于单 IP 限流）。
 
@@ -2931,6 +3086,9 @@ class RelayHandler(BaseHTTPRequestHandler):
                     **dict(zip(("recent", "usage"), self._panel_recent(user))),
                 },
             )
+            return
+        if path.startswith("/v1/_peer/"):
+            self._handle_peer(path)
             return
         if path == "/v1/toip/station":
             # 公开端点：与 /v1/whoami 同级的信息披露——只报「本站支不支持
@@ -3788,6 +3946,11 @@ class RelayHandler(BaseHTTPRequestHandler):
             # 两个路径的区别只是「拿什么换令牌」——join 收动态口令或登记口令，
             # enroll 只收一次性登记口令。暴露面由口令窗口 + 爆破闸门守着。
             self._handle_toip_join(path)
+            return
+        if path == "/v1/_peer/forward":
+            # 站间直通：鉴权靠配对令牌（不是下游令牌），所以放在通用鉴权之前。
+            # 内部仍会 loopback 调本站公开接口，令牌/额度/限流照常生效。
+            self._peer_forward()
             return
         if path == "/v1/embeddings":
             self._handle_embeddings()

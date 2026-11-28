@@ -210,3 +210,8 @@ def mail_path() -> Path:
 def verify_codes_path() -> Path:
     """邮箱验证码（只存哈希）。"""
     return relayhub_home() / "email_codes.json"
+
+
+def peer_path() -> Path:
+    """站间配对表（含配对密钥，注意文件权限）。"""
+    return relayhub_home() / "peers.json"
