@@ -250,3 +250,56 @@ def test_entry_side_passthrough_reaches_paired_station(tmp_path: Path) -> None:
         exit_thread.join(timeout=5)
         for name, value in originals.items():
             setattr(paths, name, value)
+
+
+def test_passthrough_requires_token_grant(tmp_path: Path) -> None:
+    """直连必须站长逐令牌授权：未授权的下游令牌会被明确拒绝，而不是悄悄降级。"""
+    import relayhub.paths as paths
+    from relayhub.gateway.pool import PROTOCOL_PASSTHROUGH, KeyPool, UpstreamKey
+    from relayhub.gateway.router import KeyPoolRouter
+    from relayhub.gateway.tokens import DownstreamToken, generate_token
+    from tests.support import gateway_for
+
+    originals = {name: getattr(paths, name) for name in ("users_path", "peer_path")}
+    paths.users_path = lambda: tmp_path / "users.json"
+    paths.peer_path = lambda: tmp_path / "peers.json"
+    UserStore(tmp_path / "users.json")
+
+    token = peer.new_token()
+    peer.PeerStore(tmp_path / "peers.json").upsert(
+        peer.Peer(peer_id="lab", url="", token=token)
+    )
+
+    exit_server = RelayServer(("127.0.0.1", 0), demo_router(), api_key="master-key",
+                              event_delay=0.0, tokens=TokenStore(tmp_path / "t3.json"))
+    exit_thread = threading.Thread(target=exit_server.serve_forever, daemon=True)
+    exit_thread.start()
+
+    entry_key = UpstreamKey(key_id="p2", label="lab-direct", base_url=exit_server.base_url,
+                            api_key=token, protocol=PROTOCOL_PASSTHROUGH,
+                            models=("deepseek-v4-flash",))
+    plain = DownstreamToken(token_id="d1", name="plain", token=generate_token())
+    granted = DownstreamToken(token_id="d2", name="granted", token=generate_token(),
+                              allow_passthrough=True)
+    store = TokenStore(tmp_path / "tokens.json")
+    store.mutate(lambda pool: (pool.add(plain), pool.add(granted)))
+
+    try:
+        with gateway_for(KeyPoolRouter(KeyPool([entry_key])), tokens=store) as base:
+            body = json.dumps({"model": "deepseek-v4-flash",
+                               "messages": [{"role": "user", "content": "hi"}]}).encode()
+
+            status, raw, _h = _post(base, "/v1/chat/completions", body,
+                                    {"Authorization": f"Bearer {plain.token}"})
+            assert status == 403, raw[:200]
+            assert "允许直连" in raw.decode("utf-8", "replace")
+
+            status, raw, _h = _post(base, "/v1/chat/completions", body,
+                                    {"Authorization": f"Bearer {granted.token}"})
+            assert status == 200, raw[:200]
+    finally:
+        exit_server.shutdown()
+        exit_server.server_close()
+        exit_thread.join(timeout=5)
+        for name, value in originals.items():
+            setattr(paths, name, value)

@@ -208,9 +208,14 @@ def make_key(
 
 
 @contextmanager
-def gateway_for(router: Any, api_key: str | None = None) -> Iterator[str]:
-    """起一个中转站，yield 出 base_url。"""
-    server = RelayServer(("127.0.0.1", 0), router, api_key=api_key, event_delay=0.0)
+def gateway_for(router: Any, api_key: str | None = None, *,
+                tokens: Any = None) -> Iterator[str]:
+    """起一个中转站，yield 出 base_url。
+
+    `tokens` 用于需要下游令牌鉴权的用例（如站间直连的授权校验）。
+    """
+    server = RelayServer(("127.0.0.1", 0), router, api_key=api_key,
+                         event_delay=0.0, tokens=tokens)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

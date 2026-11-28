@@ -215,3 +215,8 @@ def verify_codes_path() -> Path:
 def peer_path() -> Path:
     """站间配对表（含配对密钥，注意文件权限）。"""
     return relayhub_home() / "peers.json"
+
+
+def guard_path() -> Path:
+    """请求安全检测配置（默认不存在 = 关闭）。"""
+    return relayhub_home() / "guard.json"

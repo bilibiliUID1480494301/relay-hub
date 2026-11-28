@@ -40,6 +40,7 @@ from . import migrate as migrate_module
 from . import users as user_module
 from . import timerules as timerules_module
 from . import mailer as mailer_module
+from . import guard as guard_module
 from . import peer as peer_module
 from . import wallpaper as wallpaper_module
 from . import tokens as token_module
@@ -707,6 +708,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             "/api/webui": self._webui_state,
             "/api/mail": self._mail_state,
             "/api/peers": self._peer_state,
+            "/api/guard": self._guard_state,
             "/api/policy": lambda: self.server.policy.state(),
             "/api/features": lambda: features_module.load(paths.features_path()),
             "/api/providers": providers_module.catalog,
@@ -885,6 +887,13 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return
             self._update_settings()
             return
+        if parts == ["api", "guard"]:
+            if method != "POST":
+                self._error(405, "安全检测：GET 查看 / POST 保存")
+                return
+            self._update_guard()
+            return
+
         if parts[:2] == ["api", "mail"]:
             if method != "POST":
                 self._error(405, "邮件设置：GET 查看 / POST 保存")
@@ -1522,6 +1531,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                         rpm=rpm,
                         quota_tokens=quota_tokens,
                         allow_self_query=bool(body.get("allow_self_query", True)),
+                        allow_passthrough=bool(body.get("allow_passthrough")),
                         daily_requests=daily,
                         expires_at=(time.time() + days * 86400) if days > 0 else 0.0,
                         note=str(body.get("note") or ""),
@@ -1608,6 +1618,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             if "allow_self_query" in body:
                 record.allow_self_query = bool(body.get("allow_self_query"))
                 changed.append(f"allow_self_query={record.allow_self_query}")
+            if "allow_passthrough" in body:
+                record.allow_passthrough = bool(body.get("allow_passthrough"))
+                changed.append(f"allow_passthrough={record.allow_passthrough}")
             if "ip_text" in body:
                 # IP 白名单：一行一个，也认逗号分隔；空 = 不限（恢复全放行）。
                 record.ip_allowlist = tuple(
@@ -2333,6 +2346,52 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     # ---- 站间直通（危险功能，管理面单独标注）----
 
+    # ---- 请求安全检测（默认关闭）----
+
+    def _guard_state(self) -> None:
+        cfg = guard_module.load(paths.guard_path())
+        self._send_json(200, guard_module.public(cfg))
+
+    def _update_guard(self) -> None:
+        body = self._read_json()
+        if body is None:
+            return
+        old = guard_module.load(paths.guard_path())
+        rules = []
+        for idx, raw in enumerate(body.get("rules") or []):
+            if isinstance(raw, str):
+                # 一行一条：`正则 => 说明`；没有说明就用规则本身当理由
+                text = raw.strip()
+                if not text:
+                    continue
+                pattern, _, reason = text.partition("=>")
+                raw = {"pattern": pattern.strip(), "reason": reason.strip(),
+                       "rule_id": f"r{idx + 1}"}
+            rules.append(raw)
+        cfg = guard_module.GuardConfig(
+            enabled=bool(body.get("enabled")),
+            action="flag" if str(body.get("action")) == "flag" else "block",
+            rules=guard_module.clean_rules(rules),
+            model_enabled=bool(body.get("model_enabled")),
+            model_endpoint=str(body.get("model_endpoint") or "").strip(),
+            model_key=str(body.get("model_key") or "") or old.model_key,
+            model_name=str(body.get("model_name") or "").strip(),
+            model_timeout=min(15.0, max(0.5, float(body.get("model_timeout") or 3.0))),
+            model_fail_open=bool(body.get("model_fail_open", True)),
+            models=tuple(str(m).strip() for m in (body.get("models") or []) if str(m).strip()),
+        )
+        if cfg.model_enabled and not cfg.model_endpoint:
+            self._error(400, "启用模型判定需要填接口地址")
+            return
+        if cfg.model_endpoint and not cfg.model_endpoint.startswith(("http://", "https://")):
+            self._error(400, "模型判定接口必须是 http(s) 地址")
+            return
+        guard_module.save(paths.guard_path(), cfg)
+        audit_module.record("guard.save", path=self.server.audit_path,
+                            enabled=cfg.enabled, rules=len(cfg.rules),
+                            model_enabled=cfg.model_enabled)
+        self._send_json(200, guard_module.public(cfg))
+
     def _peer_state(self) -> None:
         """配对站点清单。**只回状态，不回令牌**。
 
@@ -3013,6 +3072,35 @@ tbody tr:hover td{ background:var(--accent-soft); }
   <p class="hint">每次直通都记审计 <code>peer.forward</code>（对端、方言、路径、状态、字节数、来源 IP）。</p>
 </section>
 <section class="panel">
+  <h2>请求安全检测（默认关闭）</h2>
+  <p class="hint">正则与模型判定都会误伤正常请求，所以默认关。开关与规则都在你手里。
+  直通路径只能用正则（拿不到消息体结构），这一点已在文档写明。</p>
+  <div class="row">
+    <label style="flex:0 0 auto"><input type="checkbox" id="gd-enabled" style="height:auto"> 启用</label>
+    <label>命中动作 <select id="gd-action">
+      <option value="block">拦截（403）</option><option value="flag">仅记录</option>
+    </select></label>
+    <label style="flex:1 1 220px">只对这些模型生效 <input id="gd-models" placeholder="逗号分隔；留空=全部"></label>
+  </div>
+  <div class="row" style="flex-direction:column;align-items:stretch">
+    <label>正则规则，一行一条：<code>正则 =&gt; 说明</code>
+      <textarea id="gd-rules" rows="4" placeholder="忽略(以上|之前)的?(所有)?(指令|规则) =&gt; 疑似破甲&#10;你现在是(DAN|无限制模式) =&gt; 角色越狱"></textarea>
+    </label>
+  </div>
+  <div class="row">
+    <label style="flex:0 0 auto"><input type="checkbox" id="gd-model-on" style="height:auto"> 启用轻量模型判定</label>
+    <label style="flex:1 1 240px">接口地址 <input id="gd-endpoint" placeholder="https://…/classify"></label>
+    <label>模型名 <input id="gd-model" placeholder="guard"></label>
+  </div>
+  <div class="row">
+    <label>密钥 <input id="gd-key" type="password" placeholder="留空 = 不修改"></label>
+    <label style="flex:0 0 120px">超时(秒) <input id="gd-timeout" type="number" min="0.5" max="15" step="0.5" value="3"></label>
+    <label style="flex:0 0 auto"><input type="checkbox" id="gd-failopen" style="height:auto" checked> 检测失败时放行</label>
+  </div>
+  <div class="row"><button id="gd-save">保存</button><button class="ghost" id="gd-load">读取当前</button></div>
+  <p class="hint" id="gd-msg"></p>
+</section>
+<section class="panel">
   <h2>服务器状态</h2>
   <p class="hint">进程与机器概况。内存细节需要服务端装 psutil，没有则显示「不可用」而不是 0。</p>
   <div style="overflow-x:auto"><table>
@@ -3154,6 +3242,7 @@ tbody tr:hover td{ background:var(--accent-soft); }
     <label>额度(tokens) <input id="t-quota" type="number" min="0" step="1" placeholder="0=不限"></label>
     <label>有效期(天) <input id="t-days" type="number" min="0" step="1" placeholder="0=永久"></label>
     <label style="flex:0 0 auto"><input type="checkbox" id="t-selfquery" checked style="height:auto"> 允许自查用量</label>
+    <label style="flex:0 0 auto;color:#b45309"><input type="checkbox" id="t-passthrough" style="height:auto"> 允许直连（危险）</label>
     <label>备注 <input id="t-note"></label>
     <button id="t-add">发放</button>
     <button class="ghost" id="t-cancel" hidden>取消编辑</button>
@@ -3712,7 +3801,7 @@ function loadPane(name){
   if(name==='theme'){loadTheme();return;}
   if(name==='audit'){loadAudit();return;}
   if(name==='models'){if(!MD_LOADED){loadModels();}else{renderModels();}return;}
-  if(name==='server'){loadServer();loadMail();loadPeers();return;}
+  if(name==='server'){loadServer();loadMail();loadPeers();loadGuard();return;}
 }
 
 
@@ -4077,6 +4166,7 @@ document.getElementById('t-add').onclick=function(){
     rpm:parseInt(document.getElementById('t-rpm').value,10)||0,
     quota_tokens:parseInt(document.getElementById('t-quota').value,10)||0,
     allow_self_query:document.getElementById('t-selfquery').checked,
+    allow_passthrough:document.getElementById('t-passthrough').checked,
     daily_requests:parseInt(document.getElementById('t-daily').value,10)||0,
     days:parseInt(document.getElementById('t-days').value,10)||0,
     note:document.getElementById('t-note').value.trim()
@@ -4117,6 +4207,7 @@ document.getElementById('t-rows').onclick=function(ev){
     document.getElementById('t-rpm').value=rec.rpm||0;
     document.getElementById('t-quota').value=rec.quota_tokens||0;
     document.getElementById('t-selfquery').checked=rec.allow_self_query!==false;
+    document.getElementById('t-passthrough').checked=!!rec.allow_passthrough;
     document.getElementById('t-daily').value=rec.daily_requests||0;
     document.getElementById('t-days').value=0;
     document.getElementById('t-note').value=rec.note||'';
@@ -4424,6 +4515,45 @@ function themeModeToggle(){
   document.getElementById('th-rotate-box').style.display=(m==='rotate')?'flex':'none';
   document.getElementById('th-api-box').style.display=(m==='api')?'flex':'none';
 }
+function loadGuard(){
+  api('GET','/api/guard').then(function(s){
+    document.getElementById('gd-enabled').checked=!!s.enabled;
+    document.getElementById('gd-action').value=s.action||'block';
+    document.getElementById('gd-models').value=(s.models||[]).join(',');
+    document.getElementById('gd-rules').value=(s.rules||[]).map(function(r){
+      return r.pattern+(r.reason?(' => '+r.reason):'');
+    }).join(NL);
+    document.getElementById('gd-model-on').checked=!!s.model_enabled;
+    document.getElementById('gd-endpoint').value=s.model_endpoint||'';
+    document.getElementById('gd-model').value=s.model_name||'';
+    document.getElementById('gd-key').value='';
+    document.getElementById('gd-key').placeholder=s.has_model_key?'已设置，留空不改':'留空 = 不修改';
+    document.getElementById('gd-timeout').value=s.model_timeout||3;
+    document.getElementById('gd-failopen').checked=s.model_fail_open!==false;
+    document.getElementById('gd-msg').textContent=s.enabled?'当前已启用':'当前未启用';
+  }).catch(function(e){toast('读取失败：'+e.message,false);});
+}
+document.getElementById('gd-load').onclick=loadGuard;
+document.getElementById('gd-save').onclick=function(){
+  var body={enabled:document.getElementById('gd-enabled').checked,
+    action:document.getElementById('gd-action').value,
+    models:(document.getElementById('gd-models').value||'').split(',').map(function(x){return x.trim();}).filter(Boolean),
+    rules:(document.getElementById('gd-rules').value||'').split(NL).filter(function(x){return x.trim();}),
+    model_enabled:document.getElementById('gd-model-on').checked,
+    model_endpoint:document.getElementById('gd-endpoint').value.trim(),
+    model_name:document.getElementById('gd-model').value.trim(),
+    model_key:document.getElementById('gd-key').value,
+    model_timeout:parseFloat(document.getElementById('gd-timeout').value)||3,
+    model_fail_open:document.getElementById('gd-failopen').checked};
+  api('POST','/api/guard',body).then(function(){
+    document.getElementById('gd-msg').textContent='已保存';
+    document.getElementById('gd-key').value='';
+    toast('安全检测设置已保存',true);
+  }).catch(function(e){
+    document.getElementById('gd-msg').textContent='';
+    toast('保存失败：'+e.message,false);
+  });
+};
 function loadPeers(){
   api('GET','/api/peers').then(function(s){
     document.getElementById('pr-warn').textContent=s.warning||'';

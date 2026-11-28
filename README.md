@@ -756,6 +756,7 @@ relayhub.gateway serve --pool %LOCALAPPDATA%/relay-hub/pool.json --api-key my-ma
 |------|------|
 | [docs/PERF.md](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/PERF.md) | 性能：本机基线、串行化点根因、与同类网关对比的正确做法 |
 | [docs/API.md](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/API.md) | Python API 完整函数列表（建站 / 客户端 / E2E / 渠道池 / 令牌 / 用户与额度） |
+| [docs/SECURITY.md](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/SECURITY.md) | 请求安全检测（默认关）：正则规则、轻量模型判定、误伤与直通边界 |
 | [docs/PEER.md](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/PEER.md) | 站间协作：配对、取余额/价格（带 advisory 警告）、字节直通与其滥用面 |
 | [docs/PANEL.md](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/PANEL.md) | 用户面板：自助密钥（额度/IP/模型/有效期）、用量与日志导出、审计、改密码与会话、免责边界 |
 | [docs/ADMIN.md](https://github.com/bilibiliUID1480494301/relay-hub/blob/main/docs/ADMIN.md) | 管理面使用与页面自定义（CSS 主题令牌、TOTP 动态管理密码、管理面 API 一览） |

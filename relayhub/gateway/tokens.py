@@ -146,6 +146,10 @@ class DownstreamToken:
     # 令牌级额度（token 数，0 = 不限）。用户余额管"谁付钱"，这里管"这把钥匙
     # 最多能用多少"——发给别人的 key 能封顶，泄露也刷不穿。
     quota_tokens: int = 0
+    # 是否允许走站间直连（危险）。**只能站长授权**：用户自助建令牌时
+    # 这个字段被忽略，永远是 False——直连会跳过本站的请求解析，
+    # 与"用户自己能开"的安全模型不兼容。
+    allow_passthrough: bool = False
     # 是否允许这把令牌自查用量与剩余额度（/v1/usage）。默认开，关掉是为了
     # 不让泄露的 key 先探余额再决定刷多少。
     allow_self_query: bool = True
@@ -239,6 +243,7 @@ class DownstreamToken:
             ip_allowlist=tuple(str(x) for x in (raw.get("ip_allowlist") or ())),
             quota_tokens=int(raw.get("quota_tokens", 0) or 0),
             allow_self_query=bool(raw.get("allow_self_query", True)),
+            allow_passthrough=bool(raw.get("allow_passthrough", False)),
             # 未知 scope（旧文件/手改坏）回退 normal，别让一份脏文件卡死整个网关
             scope=str(raw.get("scope")) if raw.get("scope") in SCOPES else SCOPE_NORMAL,
             rpm=int(raw.get("rpm", 0) or 0),

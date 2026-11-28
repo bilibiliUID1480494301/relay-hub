@@ -32,6 +32,7 @@ from . import drift as drift_module
 from .. import __version__ as relayhub_version
 from . import audit as audit_module
 from . import mailer as mailer_module
+from . import guard as guard_module
 from . import peer as peer_module
 from . import a2a as a2a_module
 from . import e2e as e2e_module
@@ -2366,8 +2367,28 @@ class RelayHandler(BaseHTTPRequestHandler):
     )
     _PEER_FORWARD_MAX_BODY = 2 * 1024 * 1024
 
+    @staticmethod
+    def _peer_usage(tail: bytes, raw_body: bytes, out_bytes: int) -> tuple[int, int]:
+        """直通的用量：优先取响应里的真实 usage，否则按字节估算（4 字节≈1 token）。"""
+        import re as _re
+
+        text = tail.decode("utf-8", "replace")
+        pairs = (
+            ("prompt_tokens", "completion_tokens"),
+            ("input_tokens", "output_tokens"),
+            ("promptTokenCount", "candidatesTokenCount"),
+        )
+        for in_key, out_key in pairs:
+            m_in = _re.search(rf'"{in_key}"\s*:\s*(\d+)', text)
+            m_out = _re.search(rf'"{out_key}"\s*:\s*(\d+)', text)
+            if m_in or m_out:
+                return (int(m_in.group(1)) if m_in else 0,
+                        int(m_out.group(1)) if m_out else 0)
+        return (max(1, len(raw_body) // 4), max(0, out_bytes // 4))
+
     def _peer_relay(self, key: Any, path: str, streaming: bool, dialect: str,
-                    identity: Any, started: float, model: str) -> None:
+                    identity: Any, started: float, model: str,
+                    guard_cfg: Any = None) -> None:
         """把请求原样转发给配对站点，响应字节原样回给客户端。
 
         与普通转发（把对端当上游）的区别只在「不翻译」：
@@ -2382,6 +2403,18 @@ class RelayHandler(BaseHTTPRequestHandler):
         from urllib.parse import urlsplit
 
         raw_body = getattr(self, "_last_raw_body", b"")
+        # 直通路径只有原始字节：能跑正则，跑不了模型判定（拿不到消息体结构）
+        if guard_cfg is not None and getattr(guard_cfg, "enabled", False) and raw_body:
+            verdict = guard_module.inspect(
+                raw_body.decode("utf-8", "replace"), guard_cfg, model, allow_model=False
+            )
+            if not verdict.allowed:
+                audit_module.record("guard.block", path=paths.audit_path(),
+                                    rule=verdict.rule_id, source="regex-passthrough",
+                                    model=model, ip=self._client_ip())
+                self._error(403, f"请求被安全策略拦截：{verdict.reason}",
+                            "permission_error", dialect)
+                return
         parts = urlsplit(key.base_url)
         conn_cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
         conn = conn_cls(parts.hostname or "127.0.0.1", parts.port or (443 if parts.scheme == "https" else 80),
@@ -2402,23 +2435,33 @@ class RelayHandler(BaseHTTPRequestHandler):
                                   ok=False, status=resp.status, reason="peer passthrough failed",
                                   model=model)
                 return
+            tail = b""
+            out_bytes = 0
             if streaming:
                 self._begin_sse()
                 while True:
                     chunk = resp.read(4096)
                     if not chunk:
                         break
+                    out_bytes += len(chunk)
+                    tail = (tail + chunk)[-8192:]      # 只留尾部找 usage，不缓存全文
                     self._write_chunk(chunk)
                 self._end_chunks()
             else:
                 payload = resp.read()
+                out_bytes = len(payload)
+                tail = payload[-8192:]
                 self.send_response(200)
                 self._echo_request_id()
                 self.send_header("Content-Type", resp.getheader("Content-Type") or "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
-            self._record(identity, True)
+            # 记账：先从尾部嗅真实 usage（OpenAI 是 prompt/completion_tokens，
+            # Anthropic 是 input/output_tokens），嗅不到就按字节估算——
+            # 「直通不记账」是错的，令牌的额度必须照扣。
+            tokens_in, tokens_out = self._peer_usage(tail, raw_body, out_bytes)
+            self._record(identity, True, tokens_in, tokens_out)
             self._log_request(started=started, dialect=dialect, identity=identity,
                               ok=True, status=200, reason="peer passthrough", model=model)
             audit_module.record("peer.relay", path=paths.audit_path(),
@@ -4182,10 +4225,41 @@ class RelayHandler(BaseHTTPRequestHandler):
         streaming = bool(body.get("stream"))
         # 站间直通：只要该模型有可用的直通渠道，就整条链路不翻译。
         # 判定必须在翻译之前——翻译之后就只剩 IR，原始字节已经没了。
+        # 安全检测（默认关闭）：在翻译与选路之前看请求文本。
+        # 直通路径另有一次仅正则的检测——那里拿不到解析后的消息体。
+        guard_cfg = guard_module.load(paths.guard_path())
+        if guard_cfg.enabled:
+            verdict = guard_module.inspect(
+                json.dumps(body, ensure_ascii=False), guard_cfg, model
+            )
+            if not verdict.allowed:
+                audit_module.record("guard.block", path=paths.audit_path(),
+                                    rule=verdict.rule_id, source=verdict.source,
+                                    model=model, ip=client_ip, request_id=request_id)
+                self._error(403, f"请求被安全策略拦截：{verdict.reason}",
+                            "permission_error", dialect)
+                self._log_request(started=started, dialect=dialect, identity=identity,
+                                  ok=False, status=403, reason=f"guard:{verdict.rule_id}",
+                                  model=model)
+                return
+
         _pick = getattr(self.router, "passthrough_key", None)
         peer_key = _pick(model) if (model and _pick) else None
         if peer_key is not None:
-            self._peer_relay(peer_key, path, streaming, dialect, identity, started, model)
+            # 直连跳过本站解析，必须由站长逐令牌授权；master 凭证视为站长本人。
+            if identity is not None and not getattr(identity, "allow_passthrough", False):
+                audit_module.record("peer.relay.denied", path=paths.audit_path(),
+                                    token=identity.name, model=model, ip=client_ip)
+                self._error(403,
+                            "该模型只提供站间直连通道，需要站长在本令牌上开启「允许直连」",
+                            "permission_error", dialect)
+                self._log_request(started=started, dialect=dialect, identity=identity,
+                                  ok=False, status=403, reason="passthrough not authorized",
+                                  model=model)
+                return
+        if peer_key is not None:
+            self._peer_relay(peer_key, path, streaming, dialect, identity, started, model,
+                             guard_cfg)
             return
         if gemini_path:
             # 入站 Gemini：模型在路径里，请求体转成内部 Anthropic 形态再走同一条链路
