@@ -358,3 +358,22 @@ def test_ipv6_allowlist_and_proxy_forms() -> None:
     assert tok.ip_allowed("::ffff:10.0.0.5")      # 双栈监听下的 IPv4-mapped
     assert not tok.ip_allowed("2001:db9::1")
     assert not tok.ip_allowed("8.8.8.8")
+
+
+def test_forwarded_headers_only_trusted_from_private_peers() -> None:
+    """公网直连不能自选 IP；只有对端是可信代理时才认转发头。"""
+    from relayhub.gateway.service import resolve_client_ip
+
+    # 公网直连 + 伪造 XFF → 用真实对端地址，忽略伪造头
+    assert resolve_client_ip("203.0.113.9", "1.2.3.4", "5.6.7.8") == "203.0.113.9"
+
+    # 本机反代（cloudflared / nginx / frp 都在这类地址上）→ 认转发头
+    assert resolve_client_ip("127.0.0.1", "203.0.113.7", "") == "203.0.113.7"
+    assert resolve_client_ip("::1", "[2001:db8::9]:443", "") == "2001:db8::9"
+    assert resolve_client_ip("10.1.2.3", "", "198.51.100.4") == "198.51.100.4"
+
+    # 多级代理取第一个（最初客户端）
+    assert resolve_client_ip("127.0.0.1", "203.0.113.7, 10.0.0.2", "") == "203.0.113.7"
+
+    # 没有转发头时仍是对端地址
+    assert resolve_client_ip("127.0.0.1", "", "") == "127.0.0.1"

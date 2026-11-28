@@ -1639,6 +1639,61 @@ def _token_hint(secret: str) -> str:
     return f"…{secret[-4:]}" if secret and len(secret) >= 4 else "…"
 
 
+# 只有在**可信代理**后面才认 X-Forwarded-For / X-Real-IP。
+# 公网直连的请求由客户端自带这两个头，认了就等于让任何人自选 IP——
+# 既能绕过 IP 白名单，也能把限流嫁祸给别人。默认信任回环与私网（本机反代、
+# cloudflared、frp、docker 网桥都在其中），可用 RELAYHUB_TRUSTED_PROXIES 覆盖。
+_DEFAULT_TRUSTED = (
+    "127.0.0.0/8", "::1/128",
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+    "fc00::/7", "fe80::/10",
+)
+
+
+def trusted_networks() -> list:
+    import ipaddress
+    import os
+
+    raw = os.environ.get("RELAYHUB_TRUSTED_PROXIES", "").strip()
+    items = [x.strip() for x in raw.replace(",", " ").split() if x.strip()] if raw else list(_DEFAULT_TRUSTED)
+    nets = []
+    for item in items:
+        try:
+            nets.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def resolve_client_ip(peer: str, forwarded: str = "", real: str = "", networks: list | None = None) -> str:
+    """决定「这个请求到底来自哪」。
+
+    * 对端是可信代理 → 取 XFF 第一个（最初客户端），其次 X-Real-IP；
+    * 对端不可信（公网直连）→ 一律用 TCP 对端地址，忽略任何转发头。
+    """
+    import ipaddress
+
+    peer_ip = normalize_client_ip(peer)
+    nets = trusted_networks() if networks is None else networks
+    trusted = False
+    try:
+        addr = ipaddress.ip_address(peer_ip)
+        if getattr(addr, "ipv4_mapped", None):
+            addr = addr.ipv4_mapped
+        trusted = any(addr in net for net in nets)
+    except ValueError:
+        trusted = False
+    if not trusted:
+        return peer_ip
+
+    first = str(forwarded or "").split(",")[0].strip()
+    if first:
+        return normalize_client_ip(first)
+    if str(real or "").strip():
+        return normalize_client_ip(real)
+    return peer_ip
+
+
 class RelayHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # 结构不变量计数器：请求结束时请求体还没读完的次数。
@@ -2303,17 +2358,11 @@ class RelayHandler(BaseHTTPRequestHandler):
         X-Forwarded-For 的**第一个**（最初客户端），但注意该头可被伪造——
         直连场景（无代理头）用 TCP 对端地址，不可伪造。
         """
-        forwarded = self.headers.get("X-Forwarded-For", "")
-        if forwarded:
-            first = forwarded.split(",")[0].strip()
-            if first:
-                # 反代常带方括号/端口（[2001:db8::1]:443），不归一化会让
-                # IP 白名单误拒、按 IP 限流把同一来源算成很多个
-                return normalize_client_ip(first)
-        real = (self.headers.get("X-Real-IP") or "").strip()
-        if real:
-            return normalize_client_ip(real)
-        return normalize_client_ip(self.client_address[0])
+        return resolve_client_ip(
+            self.client_address[0],
+            self.headers.get("X-Forwarded-For", ""),
+            self.headers.get("X-Real-IP", ""),
+        )
 
     def _handle_pair(self) -> None:
         """POST /v1/pair：发放下游令牌 + onboarding 载荷。
