@@ -2351,12 +2351,15 @@ class RelayHandler(BaseHTTPRequestHandler):
                 supplied = auth[7:]
         return supplied.strip()
 
-    # 站间直通：允许的路径与体积上限（写死，不做通用代理）
-    _PEER_FORWARD_PATHS = {
-        "openai": "/v1/chat/completions",
-        "anthropic": "/v1/messages",
-        "openai-responses": "/v1/responses",
-    }
+    # 站间直通：白名单正则（不做通用代理）。
+    # Gemini 把模型名编码在路径里（/v1beta/models/{model}:generateContent），
+    # 所以不能像其它三种那样映射成固定字符串——只能校验形状后原样转发。
+    _PEER_FORWARD_RULES = (
+        (re.compile(r"^/v1/chat/completions$"), "openai"),
+        (re.compile(r"^/v1/messages$"), "anthropic"),
+        (re.compile(r"^/v1/responses$"), "openai-responses"),
+        (re.compile(r"^/v1beta/models/[A-Za-z0-9._-]{1,80}:(generateContent|streamGenerateContent)$"), "gemini"),
+    )
     _PEER_FORWARD_MAX_BODY = 2 * 1024 * 1024
 
     def _peer_forward(self) -> None:
@@ -2383,10 +2386,15 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._error(401, str(exc), "authentication_error")
             return
 
-        dialect = str(self.headers.get("X-Peer-Dialect") or "").strip().lower()
-        target = self._PEER_FORWARD_PATHS.get(dialect)
-        if not target:
-            self._error(400, f"不支持的直通方言 {dialect!r}", "invalid_request_error")
+        # 下游接口要求什么形状，就按什么形状直通；入口站不做翻译。
+        target = str(self.headers.get("X-Peer-Path") or "").strip()
+        dialect = ""
+        for pattern, name in self._PEER_FORWARD_RULES:
+            if pattern.match(target):
+                dialect = name
+                break
+        if not dialect:
+            self._error(400, f"不允许直通的路径 {target!r}", "invalid_request_error")
             return
         if not self.api_key:
             # 没有主凭证就无法在 loopback 上通过本站鉴权；宁可明确拒绝，
@@ -2425,8 +2433,9 @@ class RelayHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             audit_module.record("peer.forward", path=paths.audit_path(),
-                                peer=peer.peer_id, dialect=dialect,
-                                status=upstream.status, bytes=len(payload))
+                                peer=peer.peer_id, dialect=dialect, target=target,
+                                status=upstream.status, bytes=len(payload),
+                                ip=self._client_ip())
         except OSError as exc:
             self._error(502, f"出口站转发失败：{exc}", "api_error")
         finally:

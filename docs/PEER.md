@@ -62,9 +62,20 @@ Authorization: Bearer <对方给我的配对令牌>
 ```
 POST /v1/_peer/forward
 Authorization: Bearer <配对令牌>
-X-Peer-Dialect: openai | anthropic | openai-responses
+X-Peer-Path: <下游要求的那个路径>
 （body 原样透传，≤ 2MB）
 ```
+
+允许的路径（正则白名单，不做通用代理）：
+
+| 路径 | 方言 |
+|---|---|
+| `^/v1/chat/completions$` | OpenAI Chat |
+| `^/v1/messages$` | Anthropic Messages |
+| `^/v1/responses$` | OpenAI Responses |
+| `^/v1beta/models/{model}:(generateContent|streamGenerateContent)$` | Google Gemini |
+
+Gemini 的模型名编码在路径里，所以不能像其它三种映射成固定字符串——校验形状后原样转发。
 
 出口站把 body 原样交给**自己的公开接口**（loopback），再把响应字节原样回传。
 它省掉的是「入口站 → 出口站」这一跳的解析与重组。

@@ -40,6 +40,7 @@ from . import migrate as migrate_module
 from . import users as user_module
 from . import timerules as timerules_module
 from . import mailer as mailer_module
+from . import peer as peer_module
 from . import wallpaper as wallpaper_module
 from . import tokens as token_module
 from . import persist as persist_module
@@ -705,6 +706,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             "/api/toip/otpauth": self._toip_otpauth,
             "/api/webui": self._webui_state,
             "/api/mail": self._mail_state,
+            "/api/peers": self._peer_state,
             "/api/policy": lambda: self.server.policy.state(),
             "/api/features": lambda: features_module.load(paths.features_path()),
             "/api/providers": providers_module.catalog,
@@ -2329,6 +2331,26 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     # ---- 邮件（SMTP）----
 
+    # ---- 站间直通（危险功能，管理面单独标注）----
+
+    def _peer_state(self) -> None:
+        """配对站点清单。**只回状态，不回令牌**。
+
+        直通是"把本站当别人的出口"，风险与普通渠道不同：对端发来的任意
+        chat 请求都会落到本地上游。管理面必须显式标注，不能混在渠道列表里。
+        """
+        store = peer_module.PeerStore(paths.peer_path())
+        peers = [p.public() for p in store.list()]
+        self._send_json(200, {
+            "ok": True,
+            "danger": True,
+            "warning": ("站间直通会把本站当作对端的出口使用：对端可向本地上游发请求，"
+                        "流量与内容责任在本站。仅在双方互信的小范围启用；"
+                        "下游令牌无法调用该端点，调用方必须持有配对令牌。"),
+            "peers": peers,
+            "enabled": any(p["enabled"] for p in peers),
+        })
+
     def _mail_state(self) -> None:
         cfg = mailer_module.load_config(paths.mail_path())
         self._send_json(200, cfg.public())
@@ -2979,6 +3001,16 @@ tbody tr:hover td{ background:var(--accent-soft); }
     <button class="ghost" id="ml-test">发送测试信</button>
   </div>
   <p class="hint" id="ml-msg"></p>
+</section>
+<section class="panel" style="border-color:#d97706">
+  <h2 style="color:#b45309">站间直通（危险）</h2>
+  <p class="hint" id="pr-warn">配对站点可以把本站当作其上游出口：对端发来的请求会落到的本地上游，
+  流量与内容责任在本站。下游令牌无法调用该端点，调用方必须持有配对令牌。</p>
+  <div style="overflow-x:auto"><table>
+    <thead><tr><th>站点</th><th>地址</th><th>状态</th><th>最近调用</th><th>备注</th></tr></thead>
+    <tbody id="pr-rows"><tr><td colspan="5" class="hint">未加载</td></tr></tbody>
+  </table></div>
+  <p class="hint">每次直通都记审计 <code>peer.forward</code>（对端、方言、路径、状态、字节数、来源 IP）。</p>
 </section>
 <section class="panel">
   <h2>服务器状态</h2>
@@ -3680,7 +3712,7 @@ function loadPane(name){
   if(name==='theme'){loadTheme();return;}
   if(name==='audit'){loadAudit();return;}
   if(name==='models'){if(!MD_LOADED){loadModels();}else{renderModels();}return;}
-  if(name==='server'){loadServer();loadMail();return;}
+  if(name==='server'){loadServer();loadMail();loadPeers();return;}
 }
 
 
@@ -4391,6 +4423,18 @@ function themeModeToggle(){
   document.getElementById('th-static-box').style.display=(m==='static')?'flex':'none';
   document.getElementById('th-rotate-box').style.display=(m==='rotate')?'flex':'none';
   document.getElementById('th-api-box').style.display=(m==='api')?'flex':'none';
+}
+function loadPeers(){
+  api('GET','/api/peers').then(function(s){
+    document.getElementById('pr-warn').textContent=s.warning||'';
+    var rows=(s.peers||[]).map(function(p){
+      var seen=p.last_seen?new Date(p.last_seen*1000).toLocaleString():'—';
+      return '<tr><td class="mono">'+p.peer_id+'</td><td class="mono">'+(p.url||'—')+'</td>'
+        +'<td>'+(p.enabled?'<span class="tag ok">启用</span>':'<span class="tag">停用</span>')+'</td>'
+        +'<td class="mono">'+seen+'</td><td>'+p.note+'</td></tr>';
+    }).join('');
+    document.getElementById('pr-rows').innerHTML=rows||'<tr><td colspan="5" class="hint">（没有配对站点）</td></tr>';
+  }).catch(function(e){toast('读取失败：'+e.message,false);});
 }
 function loadMail(){
   api('GET','/api/mail').then(function(s){

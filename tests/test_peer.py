@@ -169,12 +169,41 @@ def test_forward_requires_peer_token_and_dialect(forward_relay) -> None:
     assert status == 401
 
     status, _raw, _h = _post(base, "/v1/_peer/forward", body,
-                             {"Authorization": f"Bearer {token}", "X-Peer-Dialect": "telepathy"})
+                             {"Authorization": f"Bearer {token}", "X-Peer-Path": "/v1/telepathy"})
     assert status == 400
 
+    # 下游令牌不能当配对令牌用（防"顺手给下游开放直通"）
+    status, _raw, _h = _post(base, "/v1/_peer/forward", body,
+                             {"Authorization": "Bearer rht_not-a-peer-token",
+                              "X-Peer-Path": "/v1/chat/completions"})
+    assert status == 401
+
     status, raw, headers = _post(base, "/v1/_peer/forward", body,
-                                 {"Authorization": f"Bearer {token}", "X-Peer-Dialect": "openai"})
+                                 {"Authorization": f"Bearer {token}",
+                                  "X-Peer-Path": "/v1/chat/completions"})
     assert status == 200, raw[:200]
     assert headers.get("X-Peer-Forwarded") == "lab"
     # 字节直通：回来的就是本站公开接口的响应，未被改写
     assert b"choices" in raw or b"content" in raw
+
+
+def test_forward_accepts_gemini_path_without_fixed_mapping(forward_relay) -> None:
+    """Gemini 把模型名放在路径里，白名单必须按正则校验后原样转发。"""
+    server, home = forward_relay
+    token = peer.new_token()
+    peer.PeerStore(home / "peers.json").upsert(
+        peer.Peer(peer_id="lab", url="http://127.0.0.1:1", token=token)
+    )
+    base = server.base_url
+    body = json.dumps({"contents": [{"parts": [{"text": "hi"}]}]}).encode()
+
+    ok = {"Authorization": f"Bearer {token}",
+          "X-Peer-Path": "/v1beta/models/deepseek-v4-flash:generateContent"}
+    status, raw, _ = _post(base, "/v1/_peer/forward", body, ok)
+    assert status in (200, 400, 404), raw[:160]   # 只要是"被转发了"，不是被白名单挡掉
+    assert b"not allowed" not in raw
+
+    bad = {"Authorization": f"Bearer {token}",
+           "X-Peer-Path": "/v1beta/models/x:deleteModel"}
+    status, raw, _ = _post(base, "/v1/_peer/forward", body, bad)
+    assert status == 400, raw[:160]
